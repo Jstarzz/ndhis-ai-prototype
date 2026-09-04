@@ -1,0 +1,36 @@
+{
+  "agent": {
+    "repository": "Qwen/Qwen3-0.6B-GGUF",
+    "role": "tool_router",
+    "variant": "Q8_0",
+    "expected_disk_gb": 0.64,
+    "license": "Apache-2.0"
+  },
+  "asr": {
+    "repository": "Systran/faster-whisper-base",
+    "role": "speech_to_text",
+    "expected_disk_gb": 0.15,
+    "license": "MIT"
+  },
+  "translation": {
+    "repository": "qvac/TranslatePsy-EuroNano",
+    "role": "text_translation",
+    "variant": "Tiny INTGEMM",
+    "expected_disk_gb": 0.04,
+    "license": "Apache-2.0"
+  },
+  "forecast": {
+    "repository": "built-in",
+    "role": "time_series_forecasting",
+    "variant": "autoregressive ridge",
+    "expected_disk_gb": 0.0,
+    "license": "project"
+  },
+  "radiology": {
+    "repository": "local-compatible-cxr-onnx",
+    "role": "chest_xray_classification",
+    "expected_filename": "model.onnx",
+    "expected_disk_gb": 0.1,
+    "license": "model-dependent"
+  }
+}
