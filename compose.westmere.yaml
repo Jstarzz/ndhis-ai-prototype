@@ -22,9 +22,9 @@ services:
       - --parallel
       - ${WESTMERE_AGENT_PARALLEL:-1}
       - --threads
-      - ${WESTMERE_AGENT_THREADS:-12}
+      - ${WESTMERE_AGENT_THREADS:-6}
       - --threads-batch
-      - ${WESTMERE_AGENT_BATCH_THREADS:-12}
+      - ${WESTMERE_AGENT_BATCH_THREADS:-6}
       - --host
       - 0.0.0.0
       - --port
