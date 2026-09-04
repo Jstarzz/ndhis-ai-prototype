@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
-import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image
 
@@ -24,6 +23,17 @@ XRV_WEIGHT_FILE = os.environ.get(
     "RADIOLOGY_XRV_WEIGHT_FILE",
     "nih-pc-chex-mimic_ch-google-openi-kaggle-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt",
 )
+ONNX_FILE = os.environ.get("RADIOLOGY_ONNX_FILE", "model.onnx")
+ONNX_SIZE = int(os.environ.get("RADIOLOGY_ONNX_SIZE", "224"))
+ONNX_OUTPUT = os.environ.get("RADIOLOGY_ONNX_OUTPUT", "logits")
+ONNX_LABELS = [
+    item.strip()
+    for item in os.environ.get(
+        "RADIOLOGY_ONNX_LABELS",
+        "No Finding,Enlarged Cardiomediastinum,Cardiomegaly,Lung Opacity,Lung Lesion,Edema,Consolidation,Pneumonia,Atelectasis,Pneumothorax,Pleural Effusion,Pleural Other,Fracture,Support Devices",
+    ).split(",")
+    if item.strip()
+]
 
 processor = None
 model = None
@@ -53,6 +63,7 @@ def load_image(payload: bytes, filename: str) -> Image.Image:
 
 
 def load_medgemma():
+    import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
     if DEVICE != "cuda":
@@ -86,6 +97,15 @@ def load_xrv():
     return xrv, loaded_model
 
 
+def load_onnx():
+    import cv2
+
+    model_file = Path(MODEL_PATH) / ONNX_FILE
+    if not model_file.is_file():
+        raise RuntimeError(f"required local ONNX model missing: {model_file}")
+    return cv2, cv2.dnn.readNetFromONNX(str(model_file))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global processor, model
@@ -94,6 +114,8 @@ async def lifespan(app: FastAPI):
         processor, model = load_medgemma()
     elif BACKEND == "torchxrayvision":
         processor, model = load_xrv()
+    elif BACKEND == "opencv_onnx":
+        processor, model = load_onnx()
     else:
         raise RuntimeError(f"unsupported radiology backend: {BACKEND}")
     yield
@@ -111,11 +133,13 @@ def health():
         "backend": BACKEND,
         "device": DEVICE,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
-        "score_threshold": SCORE_THRESHOLD if BACKEND == "torchxrayvision" else None,
+        "score_threshold": SCORE_THRESHOLD if BACKEND != "medgemma" else None,
     }
 
 
 def analyze_medgemma(image: Image.Image, prompt: str):
+    import torch
+
     messages = [
         {
             "role": "user",
@@ -139,6 +163,7 @@ def analyze_medgemma(image: Image.Image, prompt: str):
 
 
 def analyze_xrv(image: Image.Image):
+    import torch
     import torchxrayvision as xrv
 
     array = np.asarray(image.convert("L"), dtype=np.float32)
@@ -148,9 +173,31 @@ def analyze_xrv(image: Image.Image):
     tensor = torch.from_numpy(array).unsqueeze(0).to(DEVICE)
     with torch.inference_mode():
         scores = model(tensor)[0].detach().cpu().numpy()
+    return format_predictions(model.pathologies, scores)
+
+
+def analyze_onnx(image: Image.Image):
+    cv2 = processor
+    array = np.asarray(image.convert("RGB").resize((ONNX_SIZE, ONNX_SIZE)), dtype=np.float32) / 255.0
+    mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+    array = (array - mean) / std
+    blob = np.transpose(array, (2, 0, 1))[None]
+    model.setInput(blob)
+    scores = np.asarray(model.forward(), dtype=np.float32).reshape(-1)
+    if ONNX_OUTPUT == "logits":
+        scores = 1.0 / (1.0 + np.exp(-scores))
+    elif ONNX_OUTPUT != "probabilities":
+        raise RuntimeError(f"unsupported RADIOLOGY_ONNX_OUTPUT: {ONNX_OUTPUT}")
+    if len(scores) != len(ONNX_LABELS):
+        raise RuntimeError(f"ONNX output count {len(scores)} does not match label count {len(ONNX_LABELS)}")
+    return format_predictions(ONNX_LABELS, scores)
+
+
+def format_predictions(labels, scores):
     predictions = [
         {"label": label, "score": round(float(score), 4)}
-        for label, score in zip(model.pathologies, scores)
+        for label, score in zip(labels, scores)
         if label
     ]
     predictions.sort(key=lambda item: item["score"], reverse=True)
@@ -184,8 +231,10 @@ async def analyze(
 
     if BACKEND == "medgemma":
         findings, predictions = analyze_medgemma(image, prompt)
-    else:
+    elif BACKEND == "torchxrayvision":
         findings, predictions = analyze_xrv(image)
+    else:
+        findings, predictions = analyze_onnx(image)
 
     result_id = hashlib.sha256(payload + str(time.time_ns()).encode()).hexdigest()[:16]
     result = {
