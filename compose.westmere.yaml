@@ -1,0 +1,97 @@
+services:
+  agent:
+    image: ndhis-westmere-agent:local
+    build:
+      context: ./services/legacy-agent
+      args:
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b10797}
+    ipc: private
+    security_opt: []
+    cap_add: []
+    shm_size: 1gb
+    environment: {}
+    volumes:
+      - ${WESTMERE_MODEL_ROOT:-./models}/cpu/agent:/models/agent:ro
+    command:
+      - --model
+      - /models/agent/Qwen3-0.6B-Q8_0.gguf
+      - --alias
+      - ${AGENT_MODEL_NAME:-ndhis-agent-westmere}
+      - --ctx-size
+      - ${AGENT_MAX_MODEL_LEN:-2048}
+      - --parallel
+      - ${WESTMERE_AGENT_PARALLEL:-1}
+      - --threads
+      - ${WESTMERE_AGENT_THREADS:-12}
+      - --threads-batch
+      - ${WESTMERE_AGENT_BATCH_THREADS:-12}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --jinja
+
+  translation-engine:
+    volumes:
+      - ${WESTMERE_MODEL_ROOT:-./models}/cpu/translation:/models/translation:ro
+
+  translation:
+    volumes:
+      - ${WESTMERE_MODEL_ROOT:-./models}/cpu/asr:/models/asr:ro
+      - ./data:/data
+
+  forecasting:
+    build:
+      context: ./services/forecasting
+      dockerfile: Dockerfile.westmere
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      FORECAST_MODEL_PATH: /models/forecast
+      FORECAST_DEVICE: cpu
+      FORECAST_BACKEND: ridge
+      FORECAST_DATA_PATH: /data/synthetic_hospital.csv
+      FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-autoregressive-ridge}
+      FORECAST_HISTORY_DAYS: ${FORECAST_HISTORY_DAYS:-730}
+      FORECAST_RIDGE_LAGS: ${FORECAST_RIDGE_LAGS:-14}
+      FORECAST_RIDGE_ALPHA: ${FORECAST_RIDGE_ALPHA:-10}
+    volumes:
+      - ./data:/data
+
+  radiology:
+    build:
+      context: ./services/radiology
+      dockerfile: Dockerfile.westmere
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      RADIOLOGY_MODEL_PATH: /models/radiology
+      RADIOLOGY_MODEL_NAME: ${RADIOLOGY_MODEL_NAME:-cxr-onnx}
+      RADIOLOGY_BACKEND: opencv_onnx
+      RADIOLOGY_DEVICE: cpu
+      RADIOLOGY_ONNX_FILE: ${RADIOLOGY_ONNX_FILE:-model.onnx}
+      RADIOLOGY_ONNX_SIZE: ${RADIOLOGY_ONNX_SIZE:-224}
+      RADIOLOGY_ONNX_OUTPUT: ${RADIOLOGY_ONNX_OUTPUT:-logits}
+      RADIOLOGY_SCORE_THRESHOLD: ${RADIOLOGY_SCORE_THRESHOLD:-0.5}
+      RADIOLOGY_MAX_UPLOAD_MB: ${RADIOLOGY_MAX_UPLOAD_MB:-32}
+      RADIOLOGY_MAX_RESULTS: ${RADIOLOGY_MAX_RESULTS:-100}
+    volumes:
+      - ${WESTMERE_MODEL_ROOT:-./models}/westmere/radiology:/models/radiology:ro
+
+  gateway:
+    environment:
+      DEMO_API_KEY: ${DEMO_API_KEY:-ndhis-local-demo}
+      RUNTIME_PROFILE: westmere
+      AGENT_URL: http://agent:8000/v1/chat/completions
+      AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-ndhis-agent-westmere}
+      ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-base}
+      TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-translatepsy-euronano-tiny}
+      FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-autoregressive-ridge}
+      RADIOLOGY_MODEL_NAME: ${RADIOLOGY_MODEL_NAME:-cxr-onnx}
+      REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-30}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-2}
+      MAX_BODY_MB: ${MAX_BODY_MB:-40}
+      TRANSLATION_URL: ws://translation:8101/ws/translate
+      FORECAST_URL: http://forecasting:8102
+      RADIOLOGY_URL: http://radiology:8103
+      AUDIT_PATH: /data/audit.jsonl
