@@ -50,12 +50,10 @@ def main():
     avx = 'avx' in flags
     avx2 = 'avx2' in flags
     avx512 = 'avx512f' in flags
-    if avx512:
+    if avx2:
         recommended_profile = 'cpu'
-    elif avx2:
-        recommended_profile = 'cpu'
-    elif sse42:
-        recommended_profile = 'westmere'
+    elif avx:
+        recommended_profile = 'legacy-cpu'
     elif sse41:
         recommended_profile = 'westmere'
     else:
