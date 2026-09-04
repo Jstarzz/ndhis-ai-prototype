@@ -10,7 +10,7 @@ verify-legacy-cpu:
 	python scripts/verify_models.py --profile legacy-cpu
 
 verify-westmere:
-	python scripts/verify_models.py --profile westmere
+	set -a; . ./.env; set +a; python scripts/verify_models.py --profile westmere
 
 preflight:
 	python scripts/preflight.py --profile gpu
@@ -22,7 +22,7 @@ preflight-legacy-cpu:
 	python scripts/preflight.py --profile legacy-cpu
 
 preflight-westmere:
-	python scripts/preflight.py --profile westmere
+	set -a; . ./.env; set +a; python scripts/preflight.py --profile westmere
 
 cpu-probe:
 	python scripts/hardware_probe.py
@@ -34,7 +34,7 @@ fetch-legacy-cpu:
 	./scripts/fetch_legacy_models.sh
 
 fetch-westmere-core:
-	bash ./scripts/fetch_westmere_core.sh
+	set -a; . ./.env; set +a; bash ./scripts/fetch_westmere_core.sh
 
 generate:
 	python scripts/generate_synthetic_data.py
