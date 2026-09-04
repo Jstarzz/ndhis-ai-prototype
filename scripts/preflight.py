@@ -1,12 +1,12 @@
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = ["agent", "asr", "translation", "forecast", "radiology"]
 
 
 def size_bytes(path: Path) -> int:
@@ -41,19 +41,33 @@ def cpu_probe():
     return report
 
 
+def model_checks(profile: str):
+    models = ROOT / "models"
+    if profile == "westmere":
+        models = Path(os.environ.get("WESTMERE_MODEL_ROOT", str(models))).expanduser().resolve()
+    if profile == "gpu":
+        return [(name, models / name) for name in ["agent", "asr", "translation", "forecast", "radiology"]]
+    if profile in {"cpu", "legacy-cpu"}:
+        cpu = models / "cpu"
+        return [(name, cpu / name) for name in ["agent", "asr", "translation", "forecast", "radiology"]]
+    cpu = models / "cpu"
+    return [
+        ("agent", cpu / "agent"),
+        ("asr", cpu / "asr"),
+        ("translation", cpu / "translation"),
+        ("radiology", models / "westmere" / "radiology"),
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", choices=["gpu", "cpu", "legacy-cpu"], default="gpu")
+    parser.add_argument("--profile", choices=["gpu", "cpu", "legacy-cpu", "westmere"], default="gpu")
     args = parser.parse_args()
 
-    models = ROOT / "models"
-    if args.profile != "gpu":
-        models = models / "cpu"
     rows = []
     missing = []
     total = 0
-    for name in REQUIRED:
-        path = models / name
+    for name, path in model_checks(args.profile):
         files = [item for item in path.iterdir() if item.name != ".gitkeep"] if path.exists() else []
         size = size_bytes(path) if files else 0
         total += size
@@ -61,6 +75,8 @@ def main():
         rows.append({"model": name, "state": state, "size_bytes": size, "size": format_size(size), "path": str(path)})
         if not files:
             missing.append(name)
+    if args.profile == "westmere":
+        rows.append({"model": "forecast", "state": "built-in", "size_bytes": 0, "size": "0 B", "path": "autoregressive ridge"})
 
     environment = {
         "docker": command_version(["docker", "--version"]) if shutil.which("docker") else "unavailable",
@@ -72,7 +88,11 @@ def main():
         hardware_ready = environment["nvidia_smi"] != "unavailable"
     else:
         environment["cpu"] = cpu_probe()
-        readiness_key = "vllm_cpu_ready" if args.profile == "cpu" else "legacy_cpu_ready"
+        readiness_key = {
+            "cpu": "vllm_cpu_ready",
+            "legacy-cpu": "legacy_cpu_ready",
+            "westmere": "westmere_cpu_ready",
+        }[args.profile]
         hardware_ready = bool(environment["cpu"].get(readiness_key))
 
     minimum_free = 15 * 1024**3 if args.profile != "gpu" else 40 * 1024**3

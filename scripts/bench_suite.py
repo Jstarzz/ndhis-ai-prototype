@@ -63,7 +63,8 @@ def sample_system(stop: threading.Event, samples: list[dict]):
             used_kb, total_kb = memory_usage()
             load1 = os.getloadavg()[0]
             samples.append({"cpu_pct": utilization, "memory_used_gb": used_kb / 1024 / 1024, "memory_total_gb": total_kb / 1024 / 1024, "load1": load1})
-            previous_total, previous_idle = total, idle
+            previous_total = total
+            previous_idle = idle
         except Exception:
             return
 
@@ -89,7 +90,6 @@ def summarize_system(samples: list[dict]):
         "memory_total_gb": round(max(item["memory_total_gb"] for item in samples), 2),
         "peak_load1": round(max(item["load1"] for item in samples), 2),
     }
-
 
 
 def hardware_snapshot():
@@ -155,7 +155,7 @@ def markdown(report: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", choices=["gpu", "cpu", "legacy-cpu"], default="gpu")
+    parser.add_argument("--profile", choices=["gpu", "cpu", "legacy-cpu", "westmere"], default="gpu")
     parser.add_argument("--vllm-url", default="http://localhost:8000/v1/chat/completions")
     parser.add_argument("--gateway-url", default="http://localhost:8080/api/chat")
     parser.add_argument("--model")
@@ -165,11 +165,20 @@ def main():
     parser.add_argument("--output", default="data/benchmarks")
     args = parser.parse_args()
 
-    model = args.model or ("ndhis-agent" if args.profile == "gpu" else "ndhis-agent-cpu")
+    if args.model:
+        model = args.model
+    elif args.profile == "gpu":
+        model = "ndhis-agent"
+    elif args.profile == "westmere":
+        model = "ndhis-agent-westmere"
+    else:
+        model = "ndhis-agent-cpu"
     if args.profile == "gpu":
         concurrency = args.concurrency or [1, 2, 4, 8, 16, 32]
     elif args.profile == "cpu":
         concurrency = args.concurrency or [1, 2, 4, 8]
+    elif args.profile == "westmere":
+        concurrency = args.concurrency or [1, 2]
     else:
         concurrency = args.concurrency or [1, 2, 4]
     report = {"timestamp": datetime.now(timezone.utc).isoformat(), "profile": args.profile, "model": model, "hardware": hardware_snapshot(), "vllm": [], "gateway": []}

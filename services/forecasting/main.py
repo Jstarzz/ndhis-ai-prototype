@@ -14,6 +14,8 @@ DATA_PATH = os.environ["FORECAST_DATA_PATH"]
 MODEL_NAME = os.environ["FORECAST_MODEL_NAME"]
 BACKEND = os.environ.get("FORECAST_BACKEND", "timesfm3")
 HISTORY_DAYS = int(os.environ["FORECAST_HISTORY_DAYS"])
+RIDGE_LAGS = int(os.environ.get("FORECAST_RIDGE_LAGS", "14"))
+RIDGE_ALPHA = float(os.environ.get("FORECAST_RIDGE_ALPHA", "10"))
 
 forecaster = None
 data = None
@@ -35,7 +37,10 @@ class ForecastRequest(BaseModel):
 
 
 def require_model(path: str) -> None:
-    files = [item for item in Path(path).iterdir() if item.name != ".gitkeep"]
+    root = Path(path)
+    if not root.exists():
+        raise RuntimeError(f"model directory not found: {path}")
+    files = [item for item in root.iterdir() if item.name != ".gitkeep"]
     if not files:
         raise RuntimeError(f"model directory is empty: {path}")
 
@@ -55,13 +60,16 @@ def load_forecaster():
         from chronos import Chronos2Pipeline
 
         return Chronos2Pipeline.from_pretrained(MODEL_PATH, device_map=DEVICE)
+    if BACKEND == "ridge":
+        return {"lags": RIDGE_LAGS, "alpha": RIDGE_ALPHA}
     raise RuntimeError(f"unsupported forecast backend: {BACKEND}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global forecaster, data
-    require_model(MODEL_PATH)
+    if BACKEND != "ridge":
+        require_model(MODEL_PATH)
     if not Path(DATA_PATH).exists():
         raise RuntimeError(f"data file not found: {DATA_PATH}")
     data = pd.read_csv(DATA_PATH, parse_dates=["date"])
@@ -149,14 +157,45 @@ def predict_chronos(dates: pd.Series, values: np.ndarray, horizon: int):
     )
 
 
+def predict_ridge(values: np.ndarray, horizon: int):
+    lags = max(2, min(int(forecaster["lags"]), len(values) // 3))
+    if len(values) <= lags + 2:
+        raise HTTPException(400, "not enough history for ridge forecast")
+    rows = []
+    targets = []
+    for index in range(lags, len(values)):
+        rows.append(values[index - lags:index])
+        targets.append(values[index])
+    x = np.asarray(rows, dtype=np.float64)
+    y = np.asarray(targets, dtype=np.float64)
+    x = np.column_stack([np.ones(len(x)), x])
+    penalty = np.eye(x.shape[1], dtype=np.float64) * float(forecaster["alpha"])
+    penalty[0, 0] = 0
+    weights = np.linalg.solve(x.T @ x + penalty, x.T @ y)
+    fitted = x @ weights
+    residual_std = float(np.std(y - fitted))
+    history = list(np.asarray(values, dtype=np.float64))
+    points = []
+    for _ in range(horizon):
+        features = np.asarray([1.0, *history[-lags:]], dtype=np.float64)
+        value = float(features @ weights)
+        points.append(value)
+        history.append(value)
+    points = np.asarray(points, dtype=float)
+    spread = 1.645 * max(residual_std, 1e-6)
+    return points, points - spread, points + spread
+
+
 @app.post("/forecast")
 def forecast(request: ForecastRequest):
     started = time.perf_counter()
     dates, values, aggregate = series_for(request)
     if BACKEND == "timesfm3":
         points, lower, upper = predict_timesfm(values, request.horizon_days)
-    else:
+    elif BACKEND == "chronos2":
         points, lower, upper = predict_chronos(dates, values, request.horizon_days)
+    else:
+        points, lower, upper = predict_ridge(values, request.horizon_days)
     points = np.maximum(points, 0)
     lower = np.maximum(lower, 0)
     upper = np.maximum(upper, 0)
