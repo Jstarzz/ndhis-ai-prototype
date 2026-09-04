@@ -34,7 +34,7 @@ fetch-legacy-cpu:
 	./scripts/fetch_legacy_models.sh
 
 fetch-westmere-core:
-	./scripts/fetch_westmere_core.sh
+	bash ./scripts/fetch_westmere_core.sh
 
 generate:
 	python scripts/generate_synthetic_data.py
