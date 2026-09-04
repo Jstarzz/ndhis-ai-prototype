@@ -1,0 +1,25 @@
+services:
+  agent:
+    image: ndhis-legacy-agent:local
+    build:
+      context: ./services/legacy-agent
+      args:
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b10797}
+    command:
+      - --model
+      - /models/agent/Qwen3-0.6B-Q8_0.gguf
+      - --alias
+      - ${AGENT_MODEL_NAME:-ndhis-agent-cpu}
+      - --ctx-size
+      - ${AGENT_MAX_MODEL_LEN:-2048}
+      - --parallel
+      - ${LEGACY_AGENT_PARALLEL:-2}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --jinja
+
+  gateway:
+    environment:
+      RUNTIME_PROFILE: legacy-cpu

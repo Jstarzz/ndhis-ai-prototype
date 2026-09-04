@@ -1,0 +1,16 @@
+FROM node:22-alpine AS build
+WORKDIR /app
+ARG VITE_API_BASE
+ARG VITE_DEMO_API_KEY
+ARG VITE_TRANSLATION_WS
+ENV VITE_API_BASE=$VITE_API_BASE
+ENV VITE_DEMO_API_KEY=$VITE_DEMO_API_KEY
+ENV VITE_TRANSLATION_WS=$VITE_TRANSLATION_WS
+COPY package.json .
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80

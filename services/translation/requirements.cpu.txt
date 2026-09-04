@@ -1,0 +1,6 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+faster-whisper==1.2.1
+transformers==4.55.4
+sentencepiece==0.2.0
+numpy==2.2.6

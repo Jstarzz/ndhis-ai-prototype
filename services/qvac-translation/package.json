@@ -1,0 +1,8 @@
+{
+  "name": "ndhis-qvac-translation",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@qvac/sdk": "0.18.2"
+  }
+}

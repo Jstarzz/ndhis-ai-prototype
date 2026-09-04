@@ -1,0 +1,119 @@
+services:
+  agent:
+    image: vllm/vllm-openai:latest
+    gpus: all
+    ipc: host
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - ./models/agent:/models/agent:ro
+    command:
+      - --model
+      - /models/agent
+      - --served-model-name
+      - ${AGENT_MODEL_NAME:-ndhis-agent}
+      - --max-model-len
+      - "4096"
+      - --gpu-memory-utilization
+      - ${AGENT_GPU_MEMORY_UTILIZATION:-0.18}
+      - --dtype
+      - auto
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8000:8000"
+
+  translation:
+    build: ./services/translation
+    gpus: all
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      ASR_MODEL_PATH: /models/asr
+      TRANSLATION_MODEL_PATH: /models/translation
+      ASR_DEVICE: ${ASR_DEVICE:-cuda}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-float16}
+      TRANSLATION_DEVICE: ${TRANSLATION_DEVICE:-cpu}
+      TRANSLATION_BACKEND: nllb
+      DEMO_API_KEY: ${DEMO_API_KEY:-ndhis-local-demo}
+      ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-large-v3-turbo}
+      TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-nllb-200-distilled-600m}
+      TRANSLATION_AUDIT_PATH: /data/translation_audit.jsonl
+      MAX_TRANSLATION_SESSION_SECONDS: ${MAX_TRANSLATION_SESSION_SECONDS:-3600}
+      TRANSLATION_CHUNK_SECONDS: ${TRANSLATION_CHUNK_SECONDS:-1.25}
+    volumes:
+      - ./models/asr:/models/asr:ro
+      - ./models/translation:/models/translation:ro
+      - ./data:/data
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8101:8101"
+
+  forecasting:
+    build: ./services/forecasting
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      FORECAST_MODEL_PATH: /models/forecast
+      FORECAST_DEVICE: ${FORECAST_DEVICE:-cpu}
+      FORECAST_DATA_PATH: /data/synthetic_hospital.csv
+      FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-timesfm-3}
+      FORECAST_HISTORY_DAYS: ${FORECAST_HISTORY_DAYS:-730}
+    volumes:
+      - ./models/forecast:/models/forecast:ro
+      - ./data:/data
+    expose:
+      - "8102"
+
+  radiology:
+    build: ./services/radiology
+    gpus: all
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      RADIOLOGY_MODEL_PATH: /models/radiology
+      RADIOLOGY_MODEL_NAME: ${RADIOLOGY_MODEL_NAME:-medgemma-1.5-4b-it}
+      RADIOLOGY_MAX_UPLOAD_MB: ${RADIOLOGY_MAX_UPLOAD_MB:-32}
+      RADIOLOGY_MAX_RESULTS: ${RADIOLOGY_MAX_RESULTS:-100}
+    volumes:
+      - ./models/radiology:/models/radiology:ro
+    expose:
+      - "8103"
+
+  gateway:
+    build: ./services/gateway
+    environment:
+      DEMO_API_KEY: ${DEMO_API_KEY:-ndhis-local-demo}
+      RUNTIME_PROFILE: gpu
+      AGENT_URL: http://agent:8000/v1/chat/completions
+      AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-ndhis-agent}
+      ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-large-v3-turbo}
+      TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-nllb-200-distilled-600m}
+      FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-timesfm-3}
+      RADIOLOGY_MODEL_NAME: ${RADIOLOGY_MODEL_NAME:-medgemma-1.5-4b-it}
+      REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-120}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-32}
+      MAX_BODY_MB: ${MAX_BODY_MB:-40}
+      TRANSLATION_URL: ws://translation:8101/ws/translate
+      FORECAST_URL: http://forecasting:8102
+      RADIOLOGY_URL: http://radiology:8103
+      AUDIT_PATH: /data/audit.jsonl
+    volumes:
+      - ./data:/data
+    depends_on:
+      - agent
+      - translation
+      - forecasting
+      - radiology
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8080:8080"
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8080}
+        VITE_DEMO_API_KEY: ${VITE_DEMO_API_KEY:-ndhis-local-demo}
+        VITE_TRANSLATION_WS: ${VITE_TRANSLATION_WS:-ws://localhost:8101/ws/translate}
+    depends_on:
+      - gateway
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:3000:80"

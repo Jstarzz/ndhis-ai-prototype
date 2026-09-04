@@ -1,0 +1,32 @@
+{
+  "agent": {
+    "repository": "LiquidAI/LFM2.5-350M",
+    "role": "tool_router",
+    "expected_disk_gb": 0.71,
+    "license": "Apache-2.0"
+  },
+  "asr": {
+    "repository": "deepdml/faster-whisper-large-v3-turbo-ct2",
+    "role": "speech_to_text",
+    "expected_disk_gb": 1.62,
+    "license": "MIT"
+  },
+  "translation": {
+    "repository": "facebook/nllb-200-distilled-600M",
+    "role": "text_translation",
+    "expected_disk_gb": 2.48,
+    "license": "CC-BY-NC-4.0"
+  },
+  "forecast": {
+    "repository": "google/timesfm-3.0-pytorch",
+    "role": "time_series_forecasting",
+    "expected_disk_gb": 1.32,
+    "license": "TimesFM Non-Commercial License v1.0"
+  },
+  "radiology": {
+    "repository": "google/medgemma-1.5-4b-it",
+    "role": "medical_image_text",
+    "expected_disk_gb": 8.64,
+    "license": "Health AI Developer Foundations"
+  }
+}

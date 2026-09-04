@@ -1,0 +1,20 @@
+{"prompt":"Forecast A&E patient arrivals for the next 30 days at JNF.","tool":"forecast_patient_volume","arguments":{"facility":"JNF","department":"A&E","horizon_days":30}}
+{"prompt":"How many people should casualty expect over the next month at JNF?","tool":"forecast_patient_volume","arguments":{"facility":"JNF","department":"A&E","horizon_days":30}}
+{"prompt":"What will patient volume in Pediatrics look like over the next two weeks?","tool":"forecast_patient_volume","arguments":{"facility":"JNF","department":"Pediatrics","horizon_days":14}}
+{"prompt":"Give me a 7 day outpatient attendance forecast.","tool":"forecast_patient_volume","arguments":{"facility":"JNF","department":"Outpatient","horizon_days":7}}
+{"prompt":"Forecast Medical Ward bed occupancy for 30 days.","tool":"forecast_bed_occupancy","arguments":{"facility":"JNF","department":"Medical Ward","horizon_days":30}}
+{"prompt":"Are we likely to have a bed capacity problem in Surgical Ward next month?","tool":"forecast_bed_occupancy","arguments":{"facility":"JNF","department":"Surgical Ward","horizon_days":30}}
+{"prompt":"Show the next 14 days of Pediatrics bed occupancy.","tool":"forecast_bed_occupancy","arguments":{"facility":"JNF","department":"Pediatrics","horizon_days":14}}
+{"prompt":"Forecast respiratory disease incidence at JNF for the next month.","tool":"forecast_disease_incidence","arguments":{"facility":"JNF","disease":"respiratory","horizon_days":30}}
+{"prompt":"What is the 30 day outlook for gastro cases?","tool":"forecast_disease_incidence","arguments":{"facility":"JNF","disease":"gastro","horizon_days":30}}
+{"prompt":"Predict hypertension cases for the next two weeks at JNF.","tool":"forecast_disease_incidence","arguments":{"facility":"JNF","disease":"hypertension","horizon_days":14}}
+{"prompt":"Retrieve radiology result 7c0f0b151a909f17.","tool":"get_radiology_result","arguments":{"result_id":"7c0f0b151a909f17"}}
+{"prompt":"Show me the AI findings for scan result abc123.","tool":"get_radiology_result","arguments":{"result_id":"abc123"}}
+{"prompt":"Are all local AI services online?","tool":"get_service_status","arguments":{}}
+{"prompt":"Check the AI service status.","tool":"get_service_status","arguments":{}}
+{"prompt":"Is radiology up right now?","tool":"get_service_status","arguments":{}}
+{"prompt":"Hello.","tool":null,"arguments":{}}
+{"prompt":"What can you do?","tool":null,"arguments":{}}
+{"prompt":"Write a short greeting for the doctor.","tool":null,"arguments":{}}
+{"prompt":"Explain what forecasting means in one sentence.","tool":null,"arguments":{}}
+{"prompt":"Thanks.","tool":null,"arguments":{}}

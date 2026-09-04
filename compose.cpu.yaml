@@ -1,0 +1,153 @@
+services:
+  agent:
+    image: vllm/vllm-openai-cpu:latest-x86_64
+    ipc: host
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_NICE
+    shm_size: 4gb
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VLLM_CPU_KVCACHE_SPACE: ${VLLM_CPU_KVCACHE_SPACE:-4}
+      VLLM_CPU_NUM_OF_RESERVED_CPU: ${VLLM_CPU_NUM_OF_RESERVED_CPU:-2}
+      VLLM_CPU_OMP_THREADS_BIND: ${VLLM_CPU_OMP_THREADS_BIND:-auto}
+    volumes:
+      - ./models/cpu/agent:/models/agent:ro
+    command:
+      - --model
+      - /models/agent
+      - --served-model-name
+      - ${AGENT_MODEL_NAME:-ndhis-agent-cpu}
+      - --max-model-len
+      - ${AGENT_MAX_MODEL_LEN:-2048}
+      - --dtype
+      - float32
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8000:8000"
+
+  translation-engine:
+    build: ./services/qvac-translation
+    environment:
+      QVAC_TRANSLATION_ROOT: /models/translation
+      QVAC_TRANSLATION_VARIANT: ${QVAC_TRANSLATION_VARIANT:-Tiny}
+      PORT: "8104"
+    volumes:
+      - ./models/cpu/translation:/models/translation:ro
+    expose:
+      - "8104"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8104/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  translation:
+    build:
+      context: ./services/translation
+      dockerfile: Dockerfile.cpu
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      ASR_MODEL_PATH: /models/asr
+      TRANSLATION_MODEL_PATH: /models/translation
+      ASR_DEVICE: cpu
+      ASR_COMPUTE_TYPE: int8
+      TRANSLATION_DEVICE: cpu
+      TRANSLATION_BACKEND: qvac
+      QVAC_TRANSLATION_URL: http://translation-engine:8104/translate
+      DEMO_API_KEY: ${DEMO_API_KEY:-ndhis-local-demo}
+      ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-base}
+      TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-translatepsy-euronano-tiny}
+      TRANSLATION_AUDIT_PATH: /data/translation_audit.jsonl
+      MAX_TRANSLATION_SESSION_SECONDS: ${MAX_TRANSLATION_SESSION_SECONDS:-3600}
+      TRANSLATION_CHUNK_SECONDS: ${TRANSLATION_CHUNK_SECONDS:-2.0}
+    volumes:
+      - ./models/cpu/asr:/models/asr:ro
+      - ./data:/data
+    depends_on:
+      translation-engine:
+        condition: service_healthy
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8101:8101"
+
+  forecasting:
+    build:
+      context: ./services/forecasting
+      dockerfile: Dockerfile.cpu
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      FORECAST_MODEL_PATH: /models/forecast
+      FORECAST_DEVICE: cpu
+      FORECAST_BACKEND: chronos2
+      FORECAST_DATA_PATH: /data/synthetic_hospital.csv
+      FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-chronos-2}
+      FORECAST_HISTORY_DAYS: ${FORECAST_HISTORY_DAYS:-730}
+    volumes:
+      - ./models/cpu/forecast:/models/forecast:ro
+      - ./data:/data
+    expose:
+      - "8102"
+
+  radiology:
+    build:
+      context: ./services/radiology
+      dockerfile: Dockerfile.cpu
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      RADIOLOGY_MODEL_PATH: /models/radiology
+      RADIOLOGY_MODEL_NAME: ${RADIOLOGY_MODEL_NAME:-torchxrayvision-densenet121-all}
+      RADIOLOGY_BACKEND: torchxrayvision
+      RADIOLOGY_DEVICE: cpu
+      RADIOLOGY_XRV_WEIGHTS: densenet121-res224-all
+      RADIOLOGY_XRV_WEIGHT_FILE: nih-pc-chex-mimic_ch-google-openi-kaggle-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt
+      RADIOLOGY_SCORE_THRESHOLD: ${RADIOLOGY_SCORE_THRESHOLD:-0.5}
+      RADIOLOGY_MAX_UPLOAD_MB: ${RADIOLOGY_MAX_UPLOAD_MB:-32}
+      RADIOLOGY_MAX_RESULTS: ${RADIOLOGY_MAX_RESULTS:-100}
+    volumes:
+      - ./models/cpu/radiology:/models/radiology:ro
+    expose:
+      - "8103"
+
+  gateway:
+    build: ./services/gateway
+    environment:
+      DEMO_API_KEY: ${DEMO_API_KEY:-ndhis-local-demo}
+      RUNTIME_PROFILE: cpu
+      AGENT_URL: http://agent:8000/v1/chat/completions
+      AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-ndhis-agent-cpu}
+      ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-base}
+      TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-translatepsy-euronano-tiny}
+      FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-chronos-2}
+      RADIOLOGY_MODEL_NAME: ${RADIOLOGY_MODEL_NAME:-torchxrayvision-densenet121-all}
+      REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-60}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-4}
+      MAX_BODY_MB: ${MAX_BODY_MB:-40}
+      TRANSLATION_URL: ws://translation:8101/ws/translate
+      FORECAST_URL: http://forecasting:8102
+      RADIOLOGY_URL: http://radiology:8103
+      AUDIT_PATH: /data/audit.jsonl
+    volumes:
+      - ./data:/data
+    depends_on:
+      - agent
+      - translation
+      - forecasting
+      - radiology
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8080:8080"
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8080}
+        VITE_DEMO_API_KEY: ${VITE_DEMO_API_KEY:-ndhis-local-demo}
+        VITE_TRANSLATION_WS: ${VITE_TRANSLATION_WS:-ws://localhost:8101/ws/translate}
+    depends_on:
+      - gateway
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:3000:80"
