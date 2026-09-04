@@ -1,4 +1,5 @@
 import argparse
+import os
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -6,6 +7,8 @@ parser.add_argument("--profile", choices=["gpu", "cpu", "legacy-cpu", "westmere"
 args = parser.parse_args()
 
 root = Path(__file__).resolve().parents[1] / "models"
+if args.profile == "westmere":
+    root = Path(os.environ.get("WESTMERE_MODEL_ROOT", str(root))).expanduser().resolve()
 checks = []
 if args.profile == "gpu":
     checks = [(name, root / name) for name in ["agent", "asr", "translation", "forecast", "radiology"]]
