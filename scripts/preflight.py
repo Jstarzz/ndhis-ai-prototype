@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,8 @@ def cpu_probe():
 
 def model_checks(profile: str):
     models = ROOT / "models"
+    if profile == "westmere":
+        models = Path(os.environ.get("WESTMERE_MODEL_ROOT", str(models))).expanduser().resolve()
     if profile == "gpu":
         return [(name, models / name) for name in ["agent", "asr", "translation", "forecast", "radiology"]]
     if profile in {"cpu", "legacy-cpu"}:
