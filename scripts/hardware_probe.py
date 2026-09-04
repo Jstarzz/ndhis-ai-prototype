@@ -45,9 +45,21 @@ def lscpu_field(name: str) -> str:
 
 def main():
     model, flags, logical = cpu_info()
+    sse41 = 'sse4_1' in flags
+    sse42 = 'sse4_2' in flags
     avx = 'avx' in flags
     avx2 = 'avx2' in flags
     avx512 = 'avx512f' in flags
+    if avx512:
+        recommended_profile = 'cpu'
+    elif avx2:
+        recommended_profile = 'cpu'
+    elif sse42:
+        recommended_profile = 'westmere'
+    elif sse41:
+        recommended_profile = 'westmere'
+    else:
+        recommended_profile = 'unsupported'
     report = {
         'cpu_model': model,
         'architecture': platform.machine(),
@@ -56,16 +68,20 @@ def main():
         'cores_per_socket': lscpu_field('Core(s) per socket'),
         'numa_nodes': lscpu_field('NUMA node(s)'),
         'memory_gb': read_mem_gb(),
+        'sse4_1': sse41,
+        'sse4_2': sse42,
         'avx': avx,
         'avx2': avx2,
         'avx512f': avx512,
         'vllm_cpu_ready': avx2,
         'legacy_cpu_ready': avx,
+        'westmere_cpu_ready': sse41,
+        'recommended_profile': recommended_profile,
         'vllm_cpu_tier': 'recommended' if avx512 else 'limited' if avx2 else 'unsupported',
     }
     print(json.dumps(report, indent=2))
-    if not avx:
-        raise SystemExit('no supported x86 CPU profile: AVX is required for the legacy runtime and AVX2 for vLLM CPU')
+    if recommended_profile == 'unsupported':
+        raise SystemExit('no supported x86 CPU profile: SSE4.1 is the minimum for the Westmere profile')
 
 
 if __name__ == '__main__':
