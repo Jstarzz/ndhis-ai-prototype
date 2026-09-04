@@ -1,18 +1,26 @@
 # CPU profile
 
-The CPU profile exists to exercise the complete prototype on a server without a GPU before running the higher-quality GPU profile.
+The CPU profiles exercise the complete prototype on servers without GPUs before running the higher-quality GPU profile.
 
 ## Hardware gate
 
-Current vLLM x86 CPU serving requires Linux and AVX2 at minimum. AVX-512 is preferred. Run:
+Run:
 
 ```bash
 make cpu-probe
 ```
 
-If `vllm_cpu_ready` is false but `legacy_cpu_ready` is true, use the explicit legacy CPU profile. It compiles llama.cpp for the host CPU and serves Qwen3-0.6B Q8 through the same OpenAI-compatible gateway contract.
+The probe chooses among three explicit CPU tiers:
 
-A dual-socket system also introduces NUMA effects. The profile uses vLLM CPU auto thread binding by default and reserves two cores for serving. Benchmark the actual machine instead of extrapolating from core count alone. If the probe shows multiple NUMA nodes, test explicit `VLLM_CPU_OMP_THREADS_BIND` layouts after the baseline run.
+```text
+AVX2+      cpu
+AVX only   legacy-cpu
+SSE4.1+    westmere
+```
+
+Current vLLM x86 CPU serving requires Linux and AVX2 at minimum. AVX-512 is preferred. The legacy profile uses llama.cpp on AVX hosts. The Westmere profile exists for older SSE4.x Xeons such as the Xeon X5650 that do not implement AVX at all.
+
+Dual-socket systems introduce NUMA effects. Benchmark the actual machine instead of extrapolating from core count alone.
 
 ## CPU model set
 
@@ -24,13 +32,40 @@ forecast     amazon/chronos-2
 radiology    TorchXRayVision DenseNet121 all
 ```
 
-The model files total about 4.8 GB. Runtime RAM is higher because the vLLM agent is served as float32 for broad old-Xeon compatibility and each service needs working memory. A 48 GB host has substantial memory headroom for this test profile.
+The standard CPU model files total about 4.8 GB. Runtime RAM is higher because the vLLM agent is served as float32 and each service needs working memory.
 
-The CPU translation profile supports English, German, Spanish, French, Italian, Portuguese, Finnish, Czech, Dutch, and Swedish. It intentionally trades NLLB's broad language coverage for dramatically lower CPU cost. Unsupported languages fail explicitly.
+## Westmere model set
 
-The CPU radiology backend is a chest X-ray classifier for software/research demonstration only. It does not replace the richer MedGemma GPU backend and is not a clinically validated diagnostic system.
+```text
+agent        Qwen3-0.6B Q8 via llama.cpp
+asr          faster-whisper base INT8
+translation  TranslatePsy-EuroNano Tiny INTGEMM
+forecast     autoregressive ridge
+radiology    local chest-X-ray ONNX classifier via OpenCV DNN
+```
 
-## Fetch and run
+The Westmere profile removes the two PyTorch-dependent specialist paths. CTranslate2 supports x86-64 processors with SSE4.1 or newer, so faster-whisper remains viable. The radiology ONNX contract requires a compatible chest-X-ray classifier at `models/westmere/radiology/model.onnx`. The configured labels, output type, and preprocessing must match the exported model.
+
+The Westmere forecast is intentionally a lightweight autoregressive ridge model fitted against the synthetic operational history. It preserves the forecasting API and provides a measurable CPU baseline, but it is not the model intended for the eventual GPU deployment.
+
+## Storage placement
+
+Do not place model weights on a nearly full Proxmox root filesystem. Set `WESTMERE_MODEL_ROOT` to a directory backed by the large data volume, for example:
+
+```text
+/srv/ndhis-ai-models
+```
+
+The directory must contain:
+
+```text
+cpu/agent
+cpu/asr
+cpu/translation
+westmere/radiology/model.onnx
+```
+
+## Fetch and run standard CPU
 
 ```bash
 cp .env.cpu.example .env
@@ -41,13 +76,34 @@ make preflight-cpu
 make up-cpu
 ```
 
-Run `make smoke` after startup, then open `http://localhost:3000`.
+## Run Westmere
+
+```bash
+cp .env.westmere.example .env
+make cpu-probe
+make fetch-westmere-core
+make generate
+make preflight-westmere
+make up-westmere
+make smoke
+```
+
+Then open `http://localhost:3000`.
 
 ## Benchmark
+
+Standard CPU:
 
 ```bash
 make eval-cpu
 make bench-cpu
+```
+
+Westmere:
+
+```bash
+make eval-westmere
+make bench-westmere
 ```
 
 The report records request throughput, p50/p95 latency, CPU saturation, RAM use, system load, and GPU metrics when a GPU is present. Use the highest concurrency that still meets the chosen latency/error target as the measured capacity of that exact host.
@@ -67,4 +123,4 @@ make eval-legacy-cpu
 make bench-legacy-cpu
 ```
 
-This profile uses the same specialist CPU services but replaces vLLM/Qwen3-1.7B with a native-compiled llama.cpp server and Qwen3-0.6B Q8. It is a test-runtime choice, not an automatic fallback. The model set is about 1.35 GB on disk.
+This profile uses the same specialist CPU services but replaces vLLM/Qwen3-1.7B with a native-compiled llama.cpp server and Qwen3-0.6B Q8. It is a test-runtime choice, not an automatic fallback.
