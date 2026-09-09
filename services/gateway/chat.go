@@ -21,7 +21,7 @@ Use {"type":"tool","name":"NAME","arguments":{...}} or {"type":"answer","content
 Forecast tool arguments: facility, department where applicable, disease where applicable, horizon, horizon_unit, resolution(optional), as_of(optional).
 Tools: forecast_patient_volume; forecast_bed_occupancy; forecast_disease_incidence; get_radiology_result(result_id); get_service_status.`
 
-var horizonValuePattern = regexp.MustCompile(`(?i)\b(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|min|hours?|hrs?|hr|h|days?|d|weeks?|w|months?|mos?|mo|years?|yrs?|yr|y)\b`)
+var horizonValuePattern = regexp.MustCompile(`(?i)(?:^|\b(?:next|for(?:\s+the)?(?:\s+next)?|over(?:\s+the)?(?:\s+next)?|forecast(?:\s+for)?))\s*(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|sec|s|minutes?|min|hours?|hr|h|days?|d|weeks?|w|months?|mo|years?|yr|y)\b`)
 var resolutionEveryPattern = regexp.MustCompile(`(?i)\bevery\s+(\d+)\s*(milliseconds?|ms|seconds?|s|minutes?|min|hours?|h|days?|d|weeks?|w|months?|mo)\b`)
 var resolutionNamedPattern = regexp.MustCompile(`(?i)\b(\d+)\s*[- ]?(millisecond|second|minute|hour|day|week|month)s?\s+(?:resolution|interval|buckets?)\b`)
 var isoDatePattern = regexp.MustCompile(`\b(20\d{2}-\d{2}-\d{2})\b`)
@@ -85,7 +85,6 @@ func (s *server) chatStream(w http.ResponseWriter, r *http.Request) {
 		_ = encoder.Encode(event)
 		flusher.Flush()
 	}
-
 	input, err := decodeChatRequest(r)
 	if err != nil {
 		emitEvent(chatStreamEvent{Type: "error", Error: err.Error()})
@@ -129,12 +128,10 @@ func (s *server) runChat(ctx context.Context, messages []message, requestID stri
 		trace = append(trace, stage)
 		emitStage(stage)
 	}
-
 	interpretStart := time.Now()
 	emitStage(executionStage{Name: "interpret", Status: "running", Detail: "Resolving intent and conversation context"})
 	decision, routed, intent := deterministicRouteDetailed(messages)
 	complete("interpret", intentLabel(intent), time.Since(interpretStart), "", "")
-
 	routing := "deterministic"
 	llmCalls := 0
 	modelUsed := ""
@@ -157,14 +154,9 @@ func (s *server) runChat(ctx context.Context, messages []message, requestID stri
 		trace = append(trace, routeStage)
 		emitStage(routeStage)
 	}
-
 	if decision.Type == "answer" {
-		return chatResponse{
-			Answer: decision.Content, LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID,
-			Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed,
-		}, http.StatusOK, nil
+		return chatResponse{Answer: decision.Content, LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID, Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed}, http.StatusOK, nil
 	}
-
 	validateStart := time.Now()
 	emitStage(executionStage{Name: "validate", Status: "running", Detail: "Checking facility, department, horizon and resolution", Tool: decision.Name})
 	validated, err := validateToolArguments(decision.Name, decision.Arguments)
@@ -172,15 +164,10 @@ func (s *server) runChat(ctx context.Context, messages []message, requestID stri
 		stage := executionStage{Name: "validate", Status: "failed", Detail: err.Error(), DurationMS: time.Since(validateStart).Milliseconds(), Tool: decision.Name}
 		trace = append(trace, stage)
 		emitStage(stage)
-		return chatResponse{
-			Answer: friendlyValidationFailure(err), Tool: decision.Name, Arguments: decision.Arguments,
-			LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID, Routing: routing,
-			Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed,
-		}, http.StatusOK, nil
+		return chatResponse{Answer: friendlyValidationFailure(err), Tool: decision.Name, Arguments: decision.Arguments, LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID, Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed}, http.StatusOK, nil
 	}
 	decision.Arguments = validated
 	complete("validate", "Inputs matched the prototype capability domain", time.Since(validateStart), decision.Name, "")
-
 	toolStart := time.Now()
 	emitStage(executionStage{Name: "tool", Status: "running", Detail: "Executing local specialist service", Tool: decision.Name})
 	toolResult, err := s.executeTool(ctx, decision.Name, decision.Arguments)
@@ -188,24 +175,16 @@ func (s *server) runChat(ctx context.Context, messages []message, requestID stri
 		stage := executionStage{Name: "tool", Status: "failed", Detail: cleanToolError(err), DurationMS: time.Since(toolStart).Milliseconds(), Tool: decision.Name}
 		trace = append(trace, stage)
 		emitStage(stage)
-		return chatResponse{
-			Answer: friendlyToolFailure(decision.Name, err), Tool: decision.Name, Arguments: decision.Arguments,
-			LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID, Routing: routing,
-			Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed,
-		}, http.StatusOK, nil
+		return chatResponse{Answer: friendlyToolFailure(decision.Name, err), Tool: decision.Name, Arguments: decision.Arguments, LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID, Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed}, http.StatusOK, nil
 	}
 	complete("tool", "Local specialist completed", time.Since(toolStart), decision.Name, "")
-
 	formatStart := time.Now()
 	answer, err := formatToolResult(decision.Name, decision.Arguments, toolResult)
 	if err != nil {
 		return chatResponse{Tool: decision.Name, RequestID: requestID, Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed}, http.StatusBadGateway, err
 	}
 	complete("format", "Formatted the tool result without another model call", time.Since(formatStart), decision.Name, "")
-	return chatResponse{
-		Answer: answer, Tool: decision.Name, Arguments: decision.Arguments, LatencyMS: time.Since(started).Milliseconds(),
-		RequestID: requestID, Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed,
-	}, http.StatusOK, nil
+	return chatResponse{Answer: answer, Tool: decision.Name, Arguments: decision.Arguments, LatencyMS: time.Since(started).Milliseconds(), RequestID: requestID, Routing: routing, Intent: intent, LLMCalls: llmCalls, Trace: trace, Model: modelUsed}, http.StatusOK, nil
 }
 
 func validateMessages(messages []message) error {
@@ -251,7 +230,6 @@ func deterministicRouteDetailed(messages []message) (agentDecision, bool, string
 			return agentDecision{Type: "answer", Content: answer}, true, "explain_previous_failure"
 		}
 	}
-
 	forecast := resolveForecastContext(messages)
 	if !forecast.Active {
 		return agentDecision{}, false, ""
@@ -268,11 +246,7 @@ func deterministicRouteDetailed(messages []message) (agentDecision, bool, string
 	if forecast.Metric == "disease_incidence" && forecast.Disease == "" {
 		return agentDecision{Type: "answer", Content: "Which disease category? This synthetic prototype supports respiratory, gastro, diabetes, and hypertension incidence."}, true, "forecast_clarification"
 	}
-
-	args := map[string]any{
-		"facility": "JNF", "horizon": forecast.Horizon, "horizon_unit": forecast.HorizonUnit,
-		"resolution": valueOr(forecast.Resolution, "auto"),
-	}
+	args := map[string]any{"facility": "JNF", "horizon": forecast.Horizon, "horizon_unit": forecast.HorizonUnit, "resolution": valueOr(forecast.Resolution, "auto")}
 	if forecast.AsOf != "" {
 		args["as_of"] = forecast.AsOf
 	}
@@ -354,12 +328,7 @@ func extractHorizonSpec(text string) (float64, string, bool) {
 		}
 		return 0, "", false
 	}
-	// When a request says "5 minute resolution for the next 2 hours", the last
-	// duration is the horizon. Otherwise the first duration is normally correct.
-	match := matches[0]
-	if len(matches) > 1 && containsAny(text, "resolution", "every ") {
-		match = matches[len(matches)-1]
-	}
+	match := matches[len(matches)-1]
 	value, err := strconv.ParseFloat(match[1], 64)
 	if err != nil || value <= 0 {
 		return 0, "", false
@@ -456,11 +425,7 @@ func serviceStatusIntent(text string) bool {
 }
 
 func forecastCapabilitiesIntent(text string) bool {
-	return containsAny(text,
-		"facilities and departments", "facility and department", "all facilities", "all departments",
-		"available departments", "what departments", "which departments", "forecast options", "forecast capabilities",
-		"what can you forecast", "forecast horizons", "forecast resolutions", "how far can you forecast",
-	)
+	return containsAny(text, "facilities and departments", "facility and department", "all facilities", "all departments", "available departments", "what departments", "which departments", "forecast options", "forecast capabilities", "what can you forecast", "forecast horizons", "forecast resolutions", "how far can you forecast")
 }
 
 func whatHappenedIntent(text string) bool {
@@ -648,7 +613,6 @@ func formatToolResult(name string, args map[string]any, result json.RawMessage) 
 	if err := json.Unmarshal(result, &payload); err != nil {
 		return "", fmt.Errorf("invalid tool result: %w", err)
 	}
-
 	switch name {
 	case "forecast_patient_volume", "forecast_bed_occupancy", "forecast_disease_incidence":
 		expected, okExpected := number(payload["expected"])
@@ -688,7 +652,6 @@ func formatToolResult(name string, args map[string]any, result json.RawMessage) 
 			}
 		}
 		return answer + ". Synthetic operational prototype data; sub-hourly values are rates/interpolations, not exact patient timestamps.", nil
-
 	case "get_radiology_result":
 		findings, _ := payload["findings"].(string)
 		findings = strings.TrimSpace(findings)
@@ -700,7 +663,6 @@ func formatToolResult(name string, args map[string]any, result json.RawMessage) 
 			resultID = stringArg(args, "result_id")
 		}
 		return fmt.Sprintf("Radiology result %s: %s Clinician review is required before any clinical use.", resultID, findings), nil
-
 	case "get_service_status":
 		services, _ := payload["services"].(map[string]any)
 		if len(services) == 0 {
@@ -774,16 +736,7 @@ func (s *server) callAgent(ctx context.Context, messages []message, maxTokens in
 	if maxTokens <= 0 || maxTokens > s.cfg.AgentMaxTokens {
 		maxTokens = s.cfg.AgentMaxTokens
 	}
-	body, err := json.Marshal(agentRequest{
-		Model:              s.cfg.AgentModel,
-		Messages:           messages,
-		Temperature:        0,
-		MaxTokens:          maxTokens,
-		ResponseFormat:     map[string]string{"type": "json_object"},
-		CachePrompt:        true,
-		ReasoningEffort:    "none",
-		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
-	})
+	body, err := json.Marshal(agentRequest{Model: s.cfg.AgentModel, Messages: messages, Temperature: 0, MaxTokens: maxTokens, ResponseFormat: map[string]string{"type": "json_object"}, CachePrompt: true, ReasoningEffort: "none", ChatTemplateKwargs: map[string]any{"enable_thinking": false}})
 	if err != nil {
 		return "", err
 	}
