@@ -13,7 +13,7 @@ import (
 const (
 	maxChatMessages      = 24
 	maxMessageCharacters = 8000
-	maxRoutingHistory    = 6
+	maxRoutingHistory    = 4
 	maxAgentResponse     = 2 << 20
 	maxToolResponse      = 4 << 20
 	maxAuditTailBytes    = 1 << 20
@@ -21,22 +21,23 @@ const (
 )
 
 type config struct {
-	RuntimeProfile   string
-	DemoKey          string
-	AgentURL         string
-	AgentModel       string
-	AgentModelLabel  string
-	TranslationURL   string
-	ForecastURL      string
-	RadiologyURL     string
-	AuditPath        string
-	RequestsPerMin   int
-	MaxConcurrent    int
-	MaxBodyBytes     int64
-	ASRModel         string
-	TranslationModel string
-	ForecastModel    string
-	RadiologyModel   string
+	RuntimeProfile    string
+	DemoKey           string
+	AgentURL          string
+	AgentModel        string
+	AgentModelLabel   string
+	TranslationURL    string
+	ForecastURL       string
+	RadiologyURL      string
+	AuditPath         string
+	RequestsPerMin    int
+	MaxConcurrent     int
+	MaxBodyBytes      int64
+	ASRModel          string
+	TranslationModel  string
+	ForecastModel     string
+	RadiologyModel    string
+	AgentMaxTokens    int
 }
 
 type server struct {
@@ -63,12 +64,14 @@ type chatRequest struct {
 }
 
 type agentRequest struct {
-	Model          string            `json:"model"`
-	Messages       []message         `json:"messages"`
-	Temperature    float64           `json:"temperature"`
-	MaxTokens      int               `json:"max_tokens"`
-	ResponseFormat map[string]string `json:"response_format"`
-	CachePrompt    bool              `json:"cache_prompt"`
+	Model              string            `json:"model"`
+	Messages           []message         `json:"messages"`
+	Temperature        float64           `json:"temperature"`
+	MaxTokens          int               `json:"max_tokens"`
+	ResponseFormat     map[string]string `json:"response_format"`
+	CachePrompt        bool              `json:"cache_prompt"`
+	ReasoningEffort    string            `json:"reasoning_effort,omitempty"`
+	ChatTemplateKwargs map[string]any    `json:"chat_template_kwargs,omitempty"`
 }
 
 type agentResponse struct {
@@ -86,14 +89,26 @@ type agentDecision struct {
 	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
+type executionStage struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Detail     string `json:"detail,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	Tool       string `json:"tool,omitempty"`
+	Model      string `json:"model,omitempty"`
+}
+
 type chatResponse struct {
-	Answer    string         `json:"answer"`
-	Tool      string         `json:"tool,omitempty"`
-	Arguments map[string]any `json:"arguments,omitempty"`
-	LatencyMS int64          `json:"latency_ms"`
-	RequestID string         `json:"request_id"`
-	Routing   string         `json:"routing"`
-	LLMCalls  int            `json:"llm_calls"`
+	Answer    string           `json:"answer"`
+	Tool      string           `json:"tool,omitempty"`
+	Arguments map[string]any   `json:"arguments,omitempty"`
+	LatencyMS int64            `json:"latency_ms"`
+	RequestID string           `json:"request_id"`
+	Routing   string           `json:"routing"`
+	Intent    string           `json:"intent,omitempty"`
+	LLMCalls  int              `json:"llm_calls"`
+	Trace     []executionStage `json:"trace,omitempty"`
+	Model     string           `json:"model,omitempty"`
 }
 
 var allowedTools = map[string]struct{}{
@@ -106,22 +121,23 @@ var allowedTools = map[string]struct{}{
 
 func main() {
 	cfg := config{
-		RuntimeProfile:   mustEnv("RUNTIME_PROFILE"),
-		DemoKey:          mustEnv("DEMO_API_KEY"),
-		AgentURL:         mustEnv("AGENT_URL"),
-		AgentModel:       mustEnv("AGENT_MODEL_NAME"),
-		AgentModelLabel:  optionalEnv("AGENT_MODEL_LABEL", mustEnv("AGENT_MODEL_NAME")),
-		TranslationURL:   mustEnv("TRANSLATION_URL"),
-		ForecastURL:      mustEnv("FORECAST_URL"),
-		RadiologyURL:     mustEnv("RADIOLOGY_URL"),
-		AuditPath:        mustEnv("AUDIT_PATH"),
-		RequestsPerMin:   mustIntEnv("REQUESTS_PER_MINUTE"),
-		MaxConcurrent:    mustIntEnv("MAX_CONCURRENT_REQUESTS"),
-		MaxBodyBytes:     int64(mustIntEnv("MAX_BODY_MB")) * 1024 * 1024,
-		ASRModel:         mustEnv("ASR_MODEL_NAME"),
-		TranslationModel: mustEnv("TRANSLATION_MODEL_NAME"),
-		ForecastModel:    mustEnv("FORECAST_MODEL_NAME"),
-		RadiologyModel:   mustEnv("RADIOLOGY_MODEL_NAME"),
+		RuntimeProfile:    mustEnv("RUNTIME_PROFILE"),
+		DemoKey:           mustEnv("DEMO_API_KEY"),
+		AgentURL:          mustEnv("AGENT_URL"),
+		AgentModel:        mustEnv("AGENT_MODEL_NAME"),
+		AgentModelLabel:   optionalEnv("AGENT_MODEL_LABEL", mustEnv("AGENT_MODEL_NAME")),
+		TranslationURL:    mustEnv("TRANSLATION_URL"),
+		ForecastURL:       mustEnv("FORECAST_URL"),
+		RadiologyURL:      mustEnv("RADIOLOGY_URL"),
+		AuditPath:         mustEnv("AUDIT_PATH"),
+		RequestsPerMin:    mustIntEnv("REQUESTS_PER_MINUTE"),
+		MaxConcurrent:     mustIntEnv("MAX_CONCURRENT_REQUESTS"),
+		MaxBodyBytes:      int64(mustIntEnv("MAX_BODY_MB")) * 1024 * 1024,
+		ASRModel:          mustEnv("ASR_MODEL_NAME"),
+		TranslationModel:  mustEnv("TRANSLATION_MODEL_NAME"),
+		ForecastModel:     mustEnv("FORECAST_MODEL_NAME"),
+		RadiologyModel:    mustEnv("RADIOLOGY_MODEL_NAME"),
+		AgentMaxTokens:    optionalIntEnv("AGENT_MAX_TOKENS", 128),
 	}
 	s := &server{
 		cfg: cfg,
@@ -141,7 +157,10 @@ func main() {
 	mux.HandleFunc("GET /api/system", s.guard(s.systemInfo))
 	mux.HandleFunc("GET /api/audit/recent", s.guard(s.recentAudit))
 	mux.HandleFunc("POST /api/chat", s.guard(s.chat))
+	mux.HandleFunc("POST /api/chat/stream", s.guard(s.chatStream))
 	mux.HandleFunc("POST /api/forecast", s.guard(s.forecastProxy))
+	mux.HandleFunc("GET /api/forecast/capabilities", s.guard(s.forecastCapabilitiesProxy))
+	mux.HandleFunc("POST /api/forecast/history", s.guard(s.forecastHistoryProxy))
 	mux.HandleFunc("POST /api/radiology", s.guard(s.radiologyProxy))
 	mux.HandleFunc("GET /api/radiology/{id}", s.guard(s.radiologyResultProxy))
 	fmt.Println("gateway listening on :8080")
@@ -168,6 +187,18 @@ func optionalEnv(key, fallback string) string {
 
 func mustIntEnv(key string) int {
 	value := mustEnv(key)
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		panic("invalid positive integer environment variable: " + key)
+	}
+	return parsed
+}
+
+func optionalIntEnv(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
 		panic("invalid positive integer environment variable: " + key)
