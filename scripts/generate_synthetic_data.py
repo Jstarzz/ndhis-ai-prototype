@@ -26,9 +26,7 @@ departments = {
     "Pediatrics": {"daily_base": 22, "beds": 18, "staff": 7},
 }
 
-# Hourly demand curves are normalized to sum to one day of activity. A&E is
-# intentionally flatter overnight, while outpatient demand is concentrated in
-# normal clinic hours. These are synthetic operational patterns, not JNF data.
+
 def hourly_profile(department: str, hour: int) -> float:
     if department == "A&E":
         curve = np.array([
@@ -55,8 +53,6 @@ def hourly_profile(department: str, hour: int) -> float:
 
 
 def outbreak_multiplier(timestamp: pd.Timestamp, department: str) -> float:
-    # A few deterministic synthetic respiratory/gastro waves make historical
-    # backtesting less trivial than a perfectly stationary sinusoid.
     respiratory_windows = [
         (pd.Timestamp("2021-12-15"), pd.Timestamp("2022-02-20"), 1.18),
         (pd.Timestamp("2023-01-05"), pd.Timestamp("2023-03-01"), 1.14),
@@ -80,8 +76,6 @@ rows: list[dict[str, object]] = []
 start_ts = hours[0]
 span_hours = max(len(hours) - 1, 1)
 
-# Daily surge values are generated once and reused across departments/hours so
-# a synthetic high-pressure day affects the hospital coherently.
 day_index = pd.date_range(hours[0].normalize(), hours[-1].normalize(), freq="D")
 daily_surge: dict[pd.Timestamp, float] = {}
 for day in day_index:
@@ -123,8 +117,6 @@ for timestamp in hours:
         expected_discharges = max(0.0, admissions * 0.92 + cfg["beds"] * 0.010)
         discharges = int(rng.poisson(expected_discharges))
 
-        # Occupancy is a synthetic percentage-like operational signal. It has
-        # daily seasonality and demand pressure but is intentionally bounded.
         occupancy = np.clip(
             61
             + 7 * np.sin(2 * np.pi * (timestamp.hour - 8) / 24)
