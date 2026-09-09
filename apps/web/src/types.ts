@@ -109,7 +109,14 @@ export type ForecastHistory = {
   series: HistoryPoint[]
 }
 
-export type RadiologyPrediction = { label: string; score: number }
+export type RadiologyPrediction = { label: string; score: number; stage?: string }
+export type RadiologyPipelineDetails = {
+  segmentation_fraction?: number
+  screening_threshold?: number
+  source?: string
+  license?: string
+  scope?: string[]
+}
 export type RadiologyResult = {
   result_id: string
   filename: string
@@ -121,6 +128,9 @@ export type RadiologyResult = {
   backend?: string
   device?: string
   data_mode?: string
+  model_source?: string
+  model_license?: string
+  pipeline_details?: RadiologyPipelineDetails | null
 }
 
 export type SystemInfo = {
