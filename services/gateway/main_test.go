@@ -19,7 +19,7 @@ func TestRateLimitPerUser(t *testing.T) {
 }
 
 func testServer() *server {
-	return &server{cfg: config{DemoKey: "key", RequestsPerMin: 10, MaxBodyBytes: 1024}, rates: map[string]rateState{}, semaphore: make(chan struct{}, 1)}
+	return &server{cfg: config{DemoKey: "key", RequestsPerMin: 10, MaxBodyBytes: 1024, AgentMaxTokens: 128}, rates: map[string]rateState{}, semaphore: make(chan struct{}, 1)}
 }
 
 func TestGuardRequiresIdentity(t *testing.T) {
@@ -59,11 +59,19 @@ func TestValidateMessages(t *testing.T) {
 	if err := validateMessages(nil); err == nil { t.Fatal("empty messages should be rejected") }
 }
 
-func TestValidateToolArguments(t *testing.T) {
+func TestValidateToolArgumentsLegacyDays(t *testing.T) {
 	args, err := validateToolArguments("forecast_patient_volume", map[string]any{"facility": "JNF", "department": "A&E", "horizon_days": float64(30), "ignored": "drop me"})
 	if err != nil { t.Fatal(err) }
-	if len(args) != 3 { t.Fatalf("expected sanitized args, got %#v", args) }
-	if _, err := validateToolArguments("forecast_patient_volume", map[string]any{"facility": "JNF", "department": "A&E", "horizon_days": float64(365)}); err == nil { t.Fatal("oversized horizon should be rejected") }
+	if args["facility"] != "JNF" || args["department"] != "A&E" || args["horizon"] != 30 || args["horizon_unit"] != "days" { t.Fatalf("unexpected sanitized args: %#v", args) }
+	if _, ok := args["ignored"]; ok { t.Fatalf("unexpected unknown arg: %#v", args) }
+}
+
+func TestValidateToolArgumentsMultiscale(t *testing.T) {
+	args, err := validateToolArguments("forecast_bed_occupancy", map[string]any{"facility":"jnf","department":"medical ward","horizon":float64(2),"horizon_unit":"hours","resolution":"5min"})
+	if err != nil { t.Fatal(err) }
+	if args["facility"] != "JNF" || args["department"] != "Medical Ward" || args["resolution"] != "5min" { t.Fatalf("unexpected args: %#v", args) }
+	if _, err := validateToolArguments("forecast_patient_volume", map[string]any{"facility":"JNF","department":"ICU","horizon":1,"horizon_unit":"days"}); err == nil { t.Fatal("unsupported department should be rejected") }
+	if _, err := validateToolArguments("forecast_patient_volume", map[string]any{"facility":"JNF","department":"A&E","horizon":3,"horizon_unit":"years"}); err == nil { t.Fatal("horizon over two years should be rejected") }
 }
 
 func TestParseAgentDecisionToleratesWrapperText(t *testing.T) {
@@ -82,18 +90,41 @@ func TestDeterministicRoutePatientForecast(t *testing.T) {
 	decision, ok := deterministicRoute([]message{{Role: "user", Content: "Forecast A&E patient arrivals for the next 30 days."}})
 	if !ok { t.Fatal("expected deterministic route") }
 	if decision.Name != "forecast_patient_volume" { t.Fatalf("unexpected tool: %s", decision.Name) }
-	if decision.Arguments["department"] != "A&E" || decision.Arguments["horizon_days"] != 30 { t.Fatalf("unexpected args: %#v", decision.Arguments) }
+	if decision.Arguments["department"] != "A&E" || decision.Arguments["horizon"] != float64(30) || decision.Arguments["horizon_unit"] != "days" { t.Fatalf("unexpected args: %#v", decision.Arguments) }
+}
+
+func TestDeterministicRouteHourlyForecastWithResolution(t *testing.T) {
+	decision, ok := deterministicRoute([]message{{Role: "user", Content: "Forecast A&E patient arrivals for the next 2 hours every 5 minutes."}})
+	if !ok { t.Fatal("expected deterministic route") }
+	if decision.Name != "forecast_patient_volume" { t.Fatalf("unexpected tool: %s", decision.Name) }
+	if decision.Arguments["horizon"] != float64(2) || decision.Arguments["horizon_unit"] != "hours" || decision.Arguments["resolution"] != "5min" { t.Fatalf("unexpected args: %#v", decision.Arguments) }
 }
 
 func TestDeterministicRouteDiseaseForecast(t *testing.T) {
 	decision, ok := deterministicRoute([]message{{Role: "user", Content: "Forecast respiratory disease incidence at JNF for 14 days."}})
 	if !ok { t.Fatal("expected deterministic route") }
 	if decision.Name != "forecast_disease_incidence" { t.Fatalf("unexpected tool: %s", decision.Name) }
-	if decision.Arguments["disease"] != "respiratory" || decision.Arguments["horizon_days"] != 14 { t.Fatalf("unexpected args: %#v", decision.Arguments) }
+	if decision.Arguments["disease"] != "respiratory" || decision.Arguments["horizon"] != float64(14) { t.Fatalf("unexpected args: %#v", decision.Arguments) }
 }
 
-func TestDeterministicRouteStaysConservative(t *testing.T) {
-	if _, ok := deterministicRoute([]message{{Role: "user", Content: "Forecast something sometime."}}); ok { t.Fatal("ambiguous request should fall back to agent") }
+func TestForecastSlotFillingAcrossTurns(t *testing.T) {
+	messages := []message{
+		{Role:"user", Content:"Forecasts for the next 2 hours?"},
+		{Role:"assistant", Content:"Which metric and department?"},
+		{Role:"user", Content:"A&E"},
+	}
+	decision, ok, intent := deterministicRouteDetailed(messages)
+	if !ok || decision.Type != "answer" || intent != "forecast_clarification" { t.Fatalf("expected deterministic clarification, got %#v %v %s", decision, ok, intent) }
+	messages = append(messages, message{Role:"assistant", Content:decision.Content}, message{Role:"user", Content:"patient arrivals every 5 minutes"})
+	decision, ok, intent = deterministicRouteDetailed(messages)
+	if !ok || decision.Name != "forecast_patient_volume" || intent != "patient_volume_forecast" { t.Fatalf("expected completed slot route, got %#v %v %s", decision, ok, intent) }
+	if decision.Arguments["department"] != "A&E" || decision.Arguments["horizon_unit"] != "hours" || decision.Arguments["resolution"] != "5min" { t.Fatalf("unexpected carried context: %#v", decision.Arguments) }
+}
+
+func TestForecastCapabilitiesAreDeterministic(t *testing.T) {
+	decision, ok, intent := deterministicRouteDetailed([]message{{Role:"user", Content:"Can you tell me all of the facilities and departments?"}})
+	if !ok || decision.Type != "answer" || intent != "forecast_capabilities" { t.Fatalf("unexpected result: %#v %v %s", decision, ok, intent) }
+	if !strings.Contains(decision.Content, "A&E") || !strings.Contains(decision.Content, "2020") { t.Fatalf("capabilities missing domain: %s", decision.Content) }
 }
 
 func TestCompactRoutingHistory(t *testing.T) {
@@ -101,14 +132,14 @@ func TestCompactRoutingHistory(t *testing.T) {
 	for i := 0; i < 10; i++ { messages = append(messages, message{Role: "user", Content: string(rune('a' + i))}) }
 	compact := compactRoutingHistory(messages)
 	if len(compact) != maxRoutingHistory { t.Fatalf("expected %d messages, got %d", maxRoutingHistory, len(compact)) }
-	if compact[0].Content != "e" || compact[len(compact)-1].Content != "j" { t.Fatalf("unexpected compact history: %#v", compact) }
+	if compact[0].Content != "g" || compact[len(compact)-1].Content != "j" { t.Fatalf("unexpected compact history: %#v", compact) }
 }
 
 func TestFormatForecastToolResult(t *testing.T) {
-	payload := json.RawMessage(`{"expected":42,"p10":35,"p90":50}`)
-	answer, err := formatToolResult("forecast_patient_volume", map[string]any{"department":"A&E","horizon_days":30}, payload)
+	payload := json.RawMessage(`{"expected":42,"p10":35,"p90":50,"resolution":"5min","horizon":{"value":2,"unit":"hours"},"intensity":{"expected_per_hour":21},"backtest":{"available":false}}`)
+	answer, err := formatToolResult("forecast_patient_volume", map[string]any{"department":"A&E","horizon":2,"horizon_unit":"hours","resolution":"5min"}, payload)
 	if err != nil { t.Fatal(err) }
-	if !strings.Contains(answer, "30-day") || !strings.Contains(answer, "42") || !strings.Contains(answer, "35-50") { t.Fatalf("unexpected answer: %s", answer) }
+	if !strings.Contains(answer, "2 hours") || !strings.Contains(answer, "42") || !strings.Contains(answer, "35-50") || !strings.Contains(answer, "5min") { t.Fatalf("unexpected answer: %s", answer) }
 }
 
 func TestRecentAuditRedactsIdentity(t *testing.T) {

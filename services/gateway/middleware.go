@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -20,4 +22,4 @@ func (s *server) allow(user string) bool { now:=time.Now(); s.rateMu.Lock(); def
 func (s *server) health(w http.ResponseWriter,r *http.Request){ ctx,cancel:=context.WithTimeout(r.Context(),5*time.Second); defer cancel(); writeJSON(w,http.StatusOK,map[string]any{"status":"ok","services":s.serviceStatus(ctx)}) }
 func (s *server) systemInfo(w http.ResponseWriter,r *http.Request){ ctx,cancel:=context.WithTimeout(r.Context(),5*time.Second); defer cancel(); writeJSON(w,http.StatusOK,map[string]any{"processing":"local","profile":s.cfg.RuntimeProfile,"services":s.serviceStatus(ctx),"models":map[string]string{"agent":s.cfg.AgentModelLabel,"asr":s.cfg.ASRModel,"translation":s.cfg.TranslationModel,"forecasting":s.cfg.ForecastModel,"radiology":s.cfg.RadiologyModel},"limits":map[string]any{"requests_per_minute_per_user":s.cfg.RequestsPerMin,"max_concurrent_requests":s.cfg.MaxConcurrent,"max_body_bytes":s.cfg.MaxBodyBytes}}) }
 func (s *server) serviceStatus(ctx context.Context) map[string]string { checks:=map[string]string{}; checks["agent"]=s.check(ctx,strings.TrimSuffix(s.cfg.AgentURL,"/v1/chat/completions")+"/v1/models"); checks["forecasting"]=s.check(ctx,s.cfg.ForecastURL+"/health"); checks["radiology"]=s.check(ctx,s.cfg.RadiologyURL+"/health"); translationHTTP:=strings.Replace(strings.TrimSuffix(s.cfg.TranslationURL,"/ws/translate"),"ws://","http://",1); translationHTTP=strings.Replace(translationHTTP,"wss://","https://",1); checks["translation"]=s.check(ctx,translationHTTP+"/health"); return checks }
-func (s *server) check(ctx context.Context,endpoint string) string { req,err:=http.NewRequestWithContext(ctx,http.MethodGet,endpoint,nil); if err!=nil{return "error"}; resp,err:=s.client.Do(req); if err!=nil{return "offline"}; defer resp.Body.Close(); if resp.StatusCode>=200&&resp.StatusCode<300{return "ready"}; return "error" }
+func (s *server) check(ctx context.Context,endpoint string) string { req,err:=http.NewRequestWithContext(ctx,http.MethodGet,endpoint,nil); if err!=nil{return "error"}; resp,err:=s.client.Do(req); if err!=nil{return "offline"}; defer resp.Body.Close(); if resp.StatusCode<200||resp.StatusCode>=300{return "error"}; var health struct{Status string `json:"status"`}; if err:=json.NewDecoder(io.LimitReader(resp.Body,4096)).Decode(&health);err==nil{switch strings.ToLower(strings.TrimSpace(health.Status)){case "degraded":return "degraded";case "error","failed":return "error";case "offline":return "offline"}}; return "ready" }
