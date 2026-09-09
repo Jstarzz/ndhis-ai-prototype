@@ -126,8 +126,6 @@ async def lifespan(app: FastAPI):
         self_test_model()
         model_ready = True
     except Exception as exc:
-        # Keep the service alive so the system page can report a degraded model
-        # instead of making the entire radiology container disappear.
         model_error = sanitize_model_error(exc)
     yield
 
@@ -152,8 +150,6 @@ def self_test_model() -> None:
         findings, predictions = analyze_xrv(image)
         if not findings or predictions is None:
             raise RuntimeError("TorchXRayVision self-test returned an invalid prediction contract")
-    # MedGemma startup is already expensive; loading/tokenization validation is
-    # sufficient here and avoids generating clinical-style text during boot.
 
 
 @app.get("/health")
