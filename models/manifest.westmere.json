@@ -1,9 +1,11 @@
 {
   "agent": {
-    "repository": "Qwen/Qwen3-0.6B-GGUF",
+    "repository": "unsloth/Qwen3.5-4B-GGUF",
     "role": "tool_router",
-    "variant": "Q8_0",
-    "expected_disk_gb": 0.64,
+    "variant": "Q4_K_M",
+    "expected_filename": "Qwen3.5-4B-Q4_K_M.gguf",
+    "expected_disk_gb": 2.74,
+    "quality_option": "unsloth/Qwen3.5-9B-GGUF Q4_K_M",
     "license": "Apache-2.0"
   },
   "asr": {

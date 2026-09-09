@@ -14,17 +14,19 @@ services:
       - ${WESTMERE_MODEL_ROOT:-./models}/cpu/agent:/models/agent:ro
     command:
       - --model
-      - /models/agent/Qwen3-0.6B-Q8_0.gguf
+      - /models/agent/${AGENT_MODEL_FILE:-Qwen3.5-4B-Q4_K_M.gguf}
       - --alias
       - ${AGENT_MODEL_NAME:-ndhis-agent-westmere}
       - --ctx-size
-      - ${AGENT_MAX_MODEL_LEN:-2048}
+      - ${AGENT_MAX_MODEL_LEN:-4096}
       - --parallel
       - ${WESTMERE_AGENT_PARALLEL:-1}
       - --threads
-      - ${WESTMERE_AGENT_THREADS:-6}
+      - ${WESTMERE_AGENT_THREADS:-12}
       - --threads-batch
-      - ${WESTMERE_AGENT_BATCH_THREADS:-6}
+      - ${WESTMERE_AGENT_BATCH_THREADS:-12}
+      - --numa
+      - ${WESTMERE_AGENT_NUMA:-distribute}
       - --host
       - 0.0.0.0
       - --port
@@ -84,6 +86,7 @@ services:
       RUNTIME_PROFILE: westmere
       AGENT_URL: http://agent:8000/v1/chat/completions
       AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-ndhis-agent-westmere}
+      AGENT_MODEL_LABEL: "${AGENT_MODEL_LABEL:-Qwen3.5-4B Q4_K_M}"
       ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-base}
       TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-translatepsy-euronano-tiny}
       FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-autoregressive-ridge}
