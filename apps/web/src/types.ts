@@ -8,6 +8,8 @@ export type ChatMessage = {
   tool?: string
   arguments?: Record<string, unknown>
   requestId?: string
+  routing?: "deterministic" | "agent" | string
+  llmCalls?: number
 }
 
 export type ForecastPoint = { date: string; forecast: number; p10: number; p90: number }
