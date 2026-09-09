@@ -33,7 +33,6 @@ DISEASE_COLUMNS = {
     "diabetes": "diabetes_cases",
     "hypertension": "hypertension_cases",
 }
-COUNT_METRICS = {"patient_arrivals", "disease_incidence"}
 RESOLUTION_PATTERN = re.compile(r"^(\d+)(ms|s|min|h|d|w|mo|y)$", re.IGNORECASE)
 HORIZON_UNITS = {
     "milliseconds": 0.001,
@@ -73,7 +72,6 @@ class ForecastRequest(BaseModel):
     resolution: str = "auto"
     as_of: datetime | None = None
     include_actuals: bool = True
-    # Backward compatibility for the original API and existing gateway clients.
     horizon_days: int | None = Field(default=None, ge=1, le=730)
 
 
@@ -149,6 +147,8 @@ async def lifespan(app: FastAPI):
     else:
         raise RuntimeError("forecast data requires timestamp or date column")
     loaded = loaded.sort_values("timestamp").reset_index(drop=True)
+    loaded["_facility_key"] = loaded["facility"].astype(str).str.casefold()
+    loaded["_department_key"] = loaded["department"].astype(str).str.casefold()
     data = loaded
     source_resolution_seconds = infer_source_resolution(loaded)
     forecaster = load_forecaster()
@@ -277,7 +277,6 @@ def horizon_seconds(request: ForecastRequest) -> tuple[float, float, str]:
     seconds = float(request.horizon) * scale
     if seconds <= 0:
         raise HTTPException(400, "horizon must be positive")
-    # Keep the demo bounded while still allowing strategic two-year scenarios.
     if seconds > 2 * HORIZON_UNITS["years"] + 86400:
         raise HTTPException(400, "forecast horizon is limited to 2 years in this prototype")
     return seconds, float(request.horizon), request.horizon_unit
@@ -311,9 +310,9 @@ def validate_point_budget(total_seconds: float, step_seconds: float) -> int:
 
 def filtered_frame(facility: str, department: str | None) -> pd.DataFrame:
     assert data is not None
-    frame = data[data["facility"].str.casefold() == facility.casefold()].copy()
+    frame = data[data["_facility_key"] == facility.casefold()]
     if department:
-        frame = frame[frame["department"].str.casefold() == department.casefold()]
+        frame = frame[frame["_department_key"] == department.casefold()]
     if frame.empty:
         raise HTTPException(404, "no synthetic data for selection")
     return frame
@@ -332,7 +331,7 @@ def aggregate_series(
         selected = selected[selected["timestamp"] > start]
     if end is not None:
         selected = selected[selected["timestamp"] <= end]
-    grouped = selected.groupby("timestamp")[column]
+    grouped = selected.groupby("timestamp", sort=False)[column]
     base = grouped.sum() if aggregate == "sum" else grouped.mean()
     base = base.sort_index().astype(float)
     if step_seconds is None or abs(step_seconds - source_resolution_seconds) < 1e-9:
@@ -385,27 +384,22 @@ def predict_ridge(values: np.ndarray, horizon: int, step_seconds: float):
         residual_std = float(np.std(values)) if len(values) > 1 else max(level * 0.1, 1e-6)
         points = np.full(horizon, level, dtype=float)
     else:
-        rows = []
-        targets = []
-        for index in range(max_lag, len(values)):
-            rows.append([values[index - lag] for lag in lags])
-            targets.append(values[index])
-        x = np.asarray(rows, dtype=np.float64)
-        y = np.asarray(targets, dtype=np.float64)
-        x = np.column_stack([np.ones(len(x)), x])
+        indices = np.arange(max_lag, len(values))
+        lag_columns = [values[indices - lag] for lag in lags]
+        x = np.column_stack([np.ones(len(indices), dtype=np.float64), *lag_columns])
+        y = values[indices]
         penalty = np.eye(x.shape[1], dtype=np.float64) * float(forecaster["alpha"])
         penalty[0, 0] = 0
         weights = np.linalg.solve(x.T @ x + penalty, x.T @ y)
-        fitted = x @ weights
-        residual_std = float(np.std(y - fitted))
+        residual_std = float(np.std(y - x @ weights))
         history = list(values)
-        generated = []
-        for _ in range(horizon):
+        generated = np.empty(horizon, dtype=np.float64)
+        for index in range(horizon):
             features = np.asarray([1.0, *[history[-lag] for lag in lags]], dtype=np.float64)
             value = float(features @ weights)
-            generated.append(value)
+            generated[index] = value
             history.append(value)
-        points = np.asarray(generated, dtype=float)
+        points = generated
     spread = 1.645 * max(residual_std, 1e-6) * np.sqrt(1.0 + np.arange(horizon) / max(horizon, 1) * 0.35)
     return points, points - spread, points + spread
 
@@ -452,7 +446,8 @@ def predict(values: np.ndarray, dates: pd.Index, horizon: int, step_seconds: flo
 
 
 def output_timestamps(as_of: pd.Timestamp, step_seconds: float, points: int) -> list[pd.Timestamp]:
-    return [as_of + pd.to_timedelta(step_seconds * (index + 1), unit="s") for index in range(points)]
+    offsets = pd.to_timedelta(np.arange(1, points + 1, dtype=np.float64) * step_seconds, unit="s")
+    return list(as_of + offsets)
 
 
 def actual_for_intervals(
@@ -462,36 +457,37 @@ def actual_for_intervals(
     as_of: pd.Timestamp,
     timestamps: list[pd.Timestamp],
 ) -> list[float | None]:
-    actuals: list[float | None] = []
-    previous = as_of
-    for current in timestamps:
-        window = frame[(frame["timestamp"] > previous) & (frame["timestamp"] <= current)]
-        if window.empty:
-            actuals.append(None)
-        elif aggregate == "sum":
-            actuals.append(float(window[column].sum()))
-        else:
-            actuals.append(float(window[column].mean()))
-        previous = current
-    return actuals
+    if not timestamps:
+        return []
+    selected = frame[(frame["timestamp"] > as_of) & (frame["timestamp"] <= timestamps[-1])]
+    if selected.empty:
+        return [None] * len(timestamps)
+    grouped = selected.groupby("timestamp", sort=True)[column]
+    series = (grouped.sum() if aggregate == "sum" else grouped.mean()).astype(float)
+    time_values = series.index.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+    values = series.to_numpy(dtype=np.float64)
+    edges = np.asarray([as_of.value, *[stamp.value for stamp in timestamps]], dtype=np.int64)
+    positions = np.searchsorted(time_values, edges, side="right")
+    prefix = np.concatenate(([0.0], np.cumsum(values)))
+    sums = prefix[positions[1:]] - prefix[positions[:-1]]
+    counts = positions[1:] - positions[:-1]
+    if aggregate == "sum":
+        return [float(value) if count else None for value, count in zip(sums, counts)]
+    return [float(value / count) if count else None for value, count in zip(sums, counts)]
 
 
 def backtest_metrics(forecast_values: np.ndarray, lower: np.ndarray, upper: np.ndarray, actuals: list[float | None]):
-    pairs = [
-        (float(pred), float(lo), float(hi), float(actual))
-        for pred, lo, hi, actual in zip(forecast_values, lower, upper, actuals)
-        if actual is not None
-    ]
-    if not pairs:
+    mask = np.asarray([value is not None for value in actuals], dtype=bool)
+    if not mask.any():
         return {"available": False, "points_compared": 0}
-    pred = np.asarray([item[0] for item in pairs])
-    lo = np.asarray([item[1] for item in pairs])
-    hi = np.asarray([item[2] for item in pairs])
-    actual = np.asarray([item[3] for item in pairs])
+    actual = np.asarray([0.0 if value is None else float(value) for value in actuals], dtype=np.float64)[mask]
+    pred = forecast_values[mask]
+    lo = lower[mask]
+    hi = upper[mask]
     errors = pred - actual
     return {
         "available": True,
-        "points_compared": len(pairs),
+        "points_compared": int(mask.sum()),
         "mae": round(float(np.mean(np.abs(errors))), 3),
         "rmse": round(float(np.sqrt(np.mean(errors ** 2))), 3),
         "bias": round(float(np.mean(errors)), 3),
@@ -524,9 +520,6 @@ def forecast(request: ForecastRequest):
         raise HTTPException(400, f"as_of predates available synthetic history ({data_start.isoformat()})")
     effective_history_end = min(as_of, data_end)
 
-    # We cannot learn millisecond/second/minute variation from hourly source data.
-    # Forecast at the source cadence and derive a continuous intensity/state for
-    # finer display resolutions instead of inventing fake precise event timing.
     model_step = max(output_step, source_resolution_seconds)
     model_horizon = max(1, int(math.ceil(total_seconds / model_step)))
     history_start = effective_history_end - pd.Timedelta(days=HISTORY_DAYS)
@@ -552,15 +545,14 @@ def forecast(request: ForecastRequest):
     model_upper = np.maximum(model_upper, 0)
 
     timestamps = output_timestamps(as_of, output_step, output_points)
-    points = np.empty(output_points, dtype=float)
-    lower = np.empty(output_points, dtype=float)
-    upper = np.empty(output_points, dtype=float)
+    model_indices = np.minimum(
+        np.floor(np.arange(output_points, dtype=np.float64) * output_step / model_step).astype(np.int64),
+        model_horizon - 1,
+    )
     scale = output_step / model_step if aggregate == "sum" and output_step < model_step else 1.0
-    for index in range(output_points):
-        model_index = min(int((index * output_step) // model_step), model_horizon - 1)
-        points[index] = model_points[model_index] * scale
-        lower[index] = model_lower[model_index] * scale
-        upper[index] = model_upper[model_index] * scale
+    points = model_points[model_indices] * scale
+    lower = model_lower[model_indices] * scale
+    upper = model_upper[model_indices] * scale
 
     if output_step < source_resolution_seconds:
         resolution_semantics = "derived_intensity" if aggregate == "sum" else "interpolated_state"
@@ -595,13 +587,14 @@ def forecast(request: ForecastRequest):
         }
 
     series = []
+    decimals = 6 if output_step < 60 else 3
     for timestamp, point, lo, hi, actual in zip(timestamps, points, lower, upper, actuals):
         item = {
             "timestamp": timestamp.isoformat(),
             "date": timestamp.isoformat(),
-            "forecast": round(float(point), 6 if output_step < 60 else 3),
-            "p10": round(float(lo), 6 if output_step < 60 else 3),
-            "p90": round(float(hi), 6 if output_step < 60 else 3),
+            "forecast": round(float(point), decimals),
+            "p10": round(float(lo), decimals),
+            "p90": round(float(hi), decimals),
         }
         if actual is not None:
             item["actual"] = round(float(actual), 3)
