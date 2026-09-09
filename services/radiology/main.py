@@ -37,6 +37,8 @@ ONNX_LABELS = [
 
 processor = None
 model = None
+model_ready = False
+model_error: str | None = None
 results = OrderedDict()
 
 
@@ -108,30 +110,62 @@ def load_onnx():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global processor, model
-    require_model(MODEL_PATH)
-    if BACKEND == "medgemma":
-        processor, model = load_medgemma()
-    elif BACKEND == "torchxrayvision":
-        processor, model = load_xrv()
-    elif BACKEND == "opencv_onnx":
-        processor, model = load_onnx()
-    else:
-        raise RuntimeError(f"unsupported radiology backend: {BACKEND}")
+    global processor, model, model_ready, model_error
+    model_ready = False
+    model_error = None
+    try:
+        require_model(MODEL_PATH)
+        if BACKEND == "medgemma":
+            processor, model = load_medgemma()
+        elif BACKEND == "torchxrayvision":
+            processor, model = load_xrv()
+        elif BACKEND == "opencv_onnx":
+            processor, model = load_onnx()
+        else:
+            raise RuntimeError(f"unsupported radiology backend: {BACKEND}")
+        self_test_model()
+        model_ready = True
+    except Exception as exc:
+        # Keep the service alive so the system page can report a degraded model
+        # instead of making the entire radiology container disappear.
+        model_error = sanitize_model_error(exc)
     yield
 
 
 app = FastAPI(lifespan=lifespan)
 
 
+def sanitize_model_error(exc: Exception) -> str:
+    text = " ".join(str(exc).split())
+    if len(text) > 500:
+        text = text[:500] + "…"
+    return text or exc.__class__.__name__
+
+
+def self_test_model() -> None:
+    image = Image.new("RGB", (ONNX_SIZE, ONNX_SIZE), color=(127, 127, 127))
+    if BACKEND == "opencv_onnx":
+        findings, predictions = analyze_onnx(image)
+        if not findings or predictions is None or len(predictions) != len(ONNX_LABELS):
+            raise RuntimeError("ONNX self-test returned an invalid prediction contract")
+    elif BACKEND == "torchxrayvision":
+        findings, predictions = analyze_xrv(image)
+        if not findings or predictions is None:
+            raise RuntimeError("TorchXRayVision self-test returned an invalid prediction contract")
+    # MedGemma startup is already expensive; loading/tokenization validation is
+    # sufficient here and avoids generating clinical-style text during boot.
+
+
 @app.get("/health")
 def health():
     return {
-        "status": "ready",
+        "status": "ready" if model_ready else "degraded",
         "local": True,
         "model": MODEL_NAME,
         "backend": BACKEND,
         "device": DEVICE,
+        "model_ready": model_ready,
+        "model_error": model_error,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "score_threshold": SCORE_THRESHOLD if BACKEND != "medgemma" else None,
     }
@@ -158,7 +192,7 @@ def analyze_medgemma(image: Image.Image, prompt: str):
     ).to(model.device, dtype=torch.float16)
     input_len = inputs["input_ids"].shape[-1]
     with torch.inference_mode():
-        generation = model.generate(**inputs, max_new_tokens=320, do_sample=False)[0][input_len:]
+        generation = model.generate(**inputs, max_new_tokens=192, do_sample=False)[0][input_len:]
     return processor.decode(generation, skip_special_tokens=True).strip(), None
 
 
@@ -217,6 +251,11 @@ async def analyze(
     prompt: str = Form("Describe the clinically relevant findings in this radiology image concisely. State uncertainty and do not invent patient history."),
 ):
     started = time.perf_counter()
+    if not model_ready:
+        raise HTTPException(
+            503,
+            f"radiology model unavailable: {model_error or 'startup self-test failed'}. Install a compatible validated model before analysis.",
+        )
     if len(prompt) > 2000:
         raise HTTPException(400, "prompt too long")
     payload = await file.read(MAX_UPLOAD_BYTES + 1)
@@ -227,14 +266,17 @@ async def analyze(
     try:
         image = load_image(payload, file.filename or "image")
     except Exception as exc:
-        raise HTTPException(400, f"invalid image: {exc}") from exc
+        raise HTTPException(400, f"invalid image: {sanitize_model_error(exc)}") from exc
 
-    if BACKEND == "medgemma":
-        findings, predictions = analyze_medgemma(image, prompt)
-    elif BACKEND == "torchxrayvision":
-        findings, predictions = analyze_xrv(image)
-    else:
-        findings, predictions = analyze_onnx(image)
+    try:
+        if BACKEND == "medgemma":
+            findings, predictions = analyze_medgemma(image, prompt)
+        elif BACKEND == "torchxrayvision":
+            findings, predictions = analyze_xrv(image)
+        else:
+            findings, predictions = analyze_onnx(image)
+    except Exception as exc:
+        raise HTTPException(503, f"radiology inference failed: {sanitize_model_error(exc)}") from exc
 
     result_id = hashlib.sha256(payload + str(time.time_ns()).encode()).hexdigest()[:16]
     result = {
