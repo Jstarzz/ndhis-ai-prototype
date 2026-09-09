@@ -21,6 +21,11 @@ export function Translation() {
   const streamRef = useRef<MediaStream | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
 
+  const secureContext = window.isSecureContext
+  const microphoneAPI = Boolean(navigator.mediaDevices?.getUserMedia)
+  const mixedContentSocket = window.location.protocol === "https:" && TRANSLATION_WS.startsWith("ws://")
+  const microphoneReady = secureContext && microphoneAPI && !mixedContentSocket
+
   useEffect(() => {
     fetch(TRANSLATION_HEALTH).then((response) => response.json() as Promise<TranslationHealth>).then((payload) => {
       if (!payload.supported_targets?.length) return
@@ -32,13 +37,25 @@ export function Translation() {
 
   async function start() {
     if (running || connecting) return
-    setConnecting(true)
     setError("")
+    if (!secureContext || !microphoneAPI) {
+      setError("Microphone access requires a secure browser context. Open NDHIS AI over HTTPS (or localhost) and allow microphone permission.")
+      return
+    }
+    if (mixedContentSocket) {
+      setError("This page is using HTTPS but the translation WebSocket is configured as ws://. Configure VITE_TRANSLATION_WS with wss:// through the HTTPS reverse proxy.")
+      return
+    }
+
+    setConnecting(true)
     let ws: WebSocket | null = null
     let stream: MediaStream | null = null
     let context: AudioContext | null = null
     let processor: ScriptProcessorNode | null = null
     try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+      context = new AudioContext()
+
       ws = new WebSocket(`${TRANSLATION_WS}?key=${encodeURIComponent(DEMO_KEY)}&user=${encodeURIComponent("demo-doctor")}&role=${encodeURIComponent("doctor")}`)
       ws.binaryType = "arraybuffer"
       await new Promise<void>((resolve, reject) => {
@@ -53,8 +70,6 @@ export function Translation() {
       }
       ws.onclose = () => setRunning(false)
 
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
-      context = new AudioContext()
       const source = context.createMediaStreamSource(stream)
       processor = context.createScriptProcessor(4096, 1, 1)
       processor.onaudioprocess = (event) => {
@@ -77,7 +92,8 @@ export function Translation() {
       if (context) void context.close()
       stream?.getTracks().forEach((track) => track.stop())
       ws?.close()
-      setError(err instanceof Error ? err.message : "Unable to start microphone translation.")
+      if (err instanceof DOMException && err.name === "NotAllowedError") setError("Microphone permission was denied. Allow microphone access for this HTTPS site and try again.")
+      else setError(err instanceof Error ? err.message : "Unable to start microphone translation.")
     } finally { setConnecting(false) }
   }
 
@@ -96,11 +112,12 @@ export function Translation() {
 
   return (
     <section className="work-panel">
-      <div className="workspace-head"><div><span className="section-label">Local speech pipeline</span><h2>Live translation</h2><p>Microphone audio is chunked locally, transcribed, then translated to the selected language.</p></div><Status state={running ? "ready" : connecting ? "checking" : "idle"} label={running ? "Microphone live" : connecting ? "Connecting" : "Stopped"} /></div>
-      <div className="control-strip"><label>Target language<select disabled={running || connecting} value={target} onChange={(event) => setTarget(event.target.value)}>{targets.map((code) => <option value={code} key={code}>{languageLabels[code] ?? code}</option>)}</select></label><button type="button" className={running ? "secondary danger" : ""} disabled={connecting} onClick={running ? stop : start}>{running ? "Stop microphone" : connecting ? "Connecting…" : "Start microphone"}</button></div>
+      <div className="workspace-head"><div><span className="section-label">Local speech pipeline</span><h2>Live translation</h2><p>Microphone audio is chunked locally, transcribed, then translated to the selected language.</p></div><Status state={running ? "ready" : connecting ? "checking" : microphoneReady ? "idle" : "error"} label={running ? "Microphone live" : connecting ? "Connecting" : microphoneReady ? "Stopped" : "HTTPS required"} /></div>
+      {!microphoneReady && <div className="secure-context-note"><strong>Secure microphone access required</strong><div>{mixedContentSocket ? "The page is secure, but the translation socket must also use wss://." : "Browser microphone APIs are unavailable on this HTTP origin. Serve the frontend over HTTPS (or use localhost)."}</div></div>}
+      <div className="control-strip"><label>Target language<select disabled={running || connecting} value={target} onChange={(event) => setTarget(event.target.value)}>{targets.map((code) => <option value={code} key={code}>{languageLabels[code] ?? code}</option>)}</select></label><button type="button" className={running ? "secondary danger" : ""} disabled={connecting || !microphoneReady} onClick={running ? stop : start}>{running ? "Stop microphone" : connecting ? "Connecting…" : "Start microphone"}</button></div>
       {error && <div className="error-box" role="alert"><strong>Translation unavailable</strong><span>{error}</span></div>}
       <div className="translation-layout">
-        <div className="translation-intro"><span className="section-label">Session</span><h3>{running ? "Listening" : "Ready when you are"}</h3><p>{running ? "Speak naturally. Recent transcript/translation pairs will appear to the right." : "Choose a target language and start the microphone. Use synthetic or non-sensitive demo speech."}</p><dl className="compact-facts"><div><dt>Source</dt><dd>Auto detect</dd></div><div><dt>Target</dt><dd>{languageLabels[target] ?? target}</dd></div><div><dt>Processing</dt><dd>Local</dd></div></dl></div>
+        <div className="translation-intro"><span className="section-label">Session</span><h3>{running ? "Listening" : microphoneReady ? "Ready when you are" : "Waiting for HTTPS"}</h3><p>{running ? "Speak naturally. Recent transcript/translation pairs will appear to the right." : microphoneReady ? "Choose a target language and start the microphone. Use synthetic or non-sensitive demo speech." : "Open the HTTPS deployment before starting live speech translation."}</p><dl className="compact-facts"><div><dt>Source</dt><dd>Auto detect</dd></div><div><dt>Target</dt><dd>{languageLabels[target] ?? target}</dd></div><div><dt>Processing</dt><dd>Local</dd></div><div><dt>Browser context</dt><dd>{secureContext ? "Secure" : "Insecure"}</dd></div></dl></div>
         <div className="translation-feed" aria-live="polite">
           {results.length === 0 && <div className="empty-state"><strong>No speech segments yet</strong><span>Translated segments appear here during the session.</span></div>}
           {results.map((result, index) => <article className="translation-item" key={`${result.latency_ms ?? 0}-${index}`}>{result.error ? <div className="inline-error">{result.error}</div> : <><div className="translation-meta"><span>{result.source_language ?? "detected"} → {result.target_language ?? target}</span><span>{result.latency_ms ?? "—"} ms</span></div><div className="source-text">{result.transcript || "—"}</div><div className="translated-text">{result.translation || "—"}</div></>}</article>)}
