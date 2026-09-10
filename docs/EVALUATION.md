@@ -1,6 +1,6 @@
 # NDHIS AI evaluation and benchmark workflow
 
-The prototype now has three different evaluation layers. They should not be mixed together.
+The prototype has three different evaluation layers. They should not be mixed together.
 
 ## 1. Deterministic gateway correctness
 
@@ -58,6 +58,8 @@ Build the public local sample:
 python scripts/fetch_radiology_eval.py --count-per-class 5
 ```
 
+The pinned dataset revision currently packages the radiographs inside `covid19_radiography.zip`. The fetcher supports both directly listed image files and ZIP-packaged images, selects the same deterministic lexicographic sample in either layout, and records a SHA-256 for every extracted test image in the manifest.
+
 Run it against the gateway:
 
 ```bash
@@ -68,6 +70,8 @@ python scripts/eval_radiology.py \
   --output data/benchmarks/radiology.json
 ```
 
+The output includes the configured-threshold screening metrics plus an exploratory threshold sweep. The sweep reports accuracy, abnormal sensitivity, normal specificity and balanced accuracy across a fixed set of thresholds including the configured value. It is descriptive only: do not tune the deployed threshold from this 20-image smoke sample.
+
 Run all review-instruction variants to test prompt invariance:
 
 ```bash
@@ -75,10 +79,13 @@ python scripts/eval_radiology.py \
   --base http://127.0.0.1:8080 \
   --key ndhis-local-demo \
   --manifest data/evals/radiology/manifest.json \
-  --prompt-all
+  --prompt-all \
+  --output data/benchmarks/radiology-prompt-invariance.json
 ```
 
-Because the Westmere ONNX path is deterministic and does not use the text prompt to alter CNN inference, the unhealthy score should remain stable across prompt variants. A non-zero drift is a regression signal worth investigating.
+`--prompt-all` automatically uses a dedicated evaluation user and spaces gateway requests by 2.25 seconds unless `--pace-seconds` is supplied. This keeps the test inside the normal 30 RPM per-user gateway policy rather than turning an invariance run into a rate-limit benchmark. HTTP 429 responses can be retried with `--retry-429`, which defaults to 2.
+
+Because the Westmere ONNX path is deterministic and does not use the text prompt to alter CNN inference, the unhealthy score should remain stable across prompt variants. A non-zero drift is a regression signal worth investigating. Check `prompt_invariance_complete_cases` before interpreting the drift metric; incomplete cases mean not every prompt variant successfully ran.
 
 The labeled sample is a research smoke test. Training-data overlap with the current radiology pipeline has not been excluded, and the label scope is narrow. Do not report these results as clinical validation, diagnostic accuracy for JNF, or evidence that a below-threshold image is clinically normal.
 
