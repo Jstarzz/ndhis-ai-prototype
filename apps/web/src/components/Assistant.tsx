@@ -5,21 +5,22 @@ import type { ChatMessage, ExecutionStage } from "../types"
 const STAGE_LABELS: Record<string, string> = {
   interpret: "Interpreting request",
   route: "Routing locally",
-  model: "Calling local assistant model",
+  model: "Using local AI",
   validate: "Validating inputs",
   tool: "Running specialist service",
   format: "Formatting result",
 }
 
 export function Assistant() {
-  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: "I can explain this prototype and route supported operational requests to local tools. Try a JNF patient-volume forecast, ask which departments are available, or ask for service status." }])
+  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: "I can explain this prototype, answer general questions, and route supported JNF operational requests to local tools." }])
   const [input, setInput] = useState("")
   const [busy, setBusy] = useState(false)
   const [liveStage, setLiveStage] = useState<ExecutionStage | null>(null)
+  const [liveText, setLiveText] = useState("")
   const examples = [
     "Forecast A&E patient arrivals for the next 2 hours every 5 minutes.",
-    "What facilities and departments can I forecast?",
-    "Backtest respiratory disease incidence at JNF for 30 days as of 2024-06-01.",
+    "What does this prototype do?",
+    "Why can local inference be useful in a hospital?",
   ]
 
   async function submit(event: FormEvent) {
@@ -30,6 +31,7 @@ export function Assistant() {
     setMessages(next)
     setInput("")
     setBusy(true)
+    setLiveText("")
     setLiveStage({ name: "interpret", status: "running", detail: "Sending request to the local gateway" })
 
     const controller = new AbortController()
@@ -55,6 +57,7 @@ export function Assistant() {
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
+      let streamedText = ""
       let resultMessage: ChatMessage | null = null
       while (true) {
         const { value, done } = await reader.read()
@@ -65,6 +68,10 @@ export function Assistant() {
           if (!line.trim()) continue
           const event = JSON.parse(line)
           if (event.type === "stage" && event.stage) setLiveStage(event.stage as ExecutionStage)
+          if (event.type === "delta" && typeof event.delta === "string") {
+            streamedText += event.delta
+            setLiveText(streamedText)
+          }
           if (event.type === "error") throw new Error(event.error ?? "assistant request failed")
           if (event.type === "result" && event.response) resultMessage = responseToMessage(event.response, response)
         }
@@ -72,6 +79,10 @@ export function Assistant() {
       }
       if (buffer.trim()) {
         const event = JSON.parse(buffer)
+        if (event.type === "delta" && typeof event.delta === "string") {
+          streamedText += event.delta
+          setLiveText(streamedText)
+        }
         if (event.type === "result" && event.response) resultMessage = responseToMessage(event.response, response)
         if (event.type === "error") throw new Error(event.error ?? "assistant request failed")
       }
@@ -84,6 +95,7 @@ export function Assistant() {
       setMessages([...next, { role: "assistant", content: message }])
     } finally {
       window.clearTimeout(timeout)
+      setLiveText("")
       setLiveStage(null)
       setBusy(false)
     }
@@ -91,13 +103,13 @@ export function Assistant() {
 
   return (
     <section className="work-panel assistant-workspace">
-      <div className="workspace-head"><div><span className="section-label">Observable local agent</span><h2>Clinical operations assistant</h2><p>Resolves common workflows deterministically, uses specialist services directly, and falls back to the local model only when language reasoning is needed.</p></div><div className="model-tag">Local execution</div></div>
+      <div className="workspace-head"><div><span className="section-label">Observable local agent</span><h2>Clinical operations assistant</h2><p>Uses deterministic specialists for obvious workflows, a constrained local router for ambiguous operational language, and streamed Gemma responses for genuine conversation.</p></div><div className="model-tag">Local execution</div></div>
       <div className="suggestion-row" aria-label="Example prompts">{examples.map((example) => <button type="button" key={example} onClick={() => setInput(example)}>{example}</button>)}</div>
       <div className="chat-log" aria-live="polite">
         {messages.map((message, index) => <Message key={`${message.role}-${index}`} message={message} />)}
-        {busy && <div className="message assistant"><div className="message-label">NDHIS AI</div><div className="message-body thinking"><strong>{STAGE_LABELS[liveStage?.name ?? ""] ?? "Working locally"}</strong><span>{liveStage?.detail ?? "Resolving the request…"}</span>{liveStage?.model && <small>{liveStage.model}</small>}{liveStage?.tool && <small>{liveStage.tool}</small>}</div></div>}
+        {busy && <div className="message assistant"><div className="message-label">NDHIS AI</div><div className="message-body thinking">{liveText ? <p>{liveText}<span aria-hidden="true"> ▍</span></p> : <><strong>{STAGE_LABELS[liveStage?.name ?? ""] ?? "Working locally"}</strong><span>{liveStage?.detail ?? "Resolving the request…"}</span></>}{liveText && <small>{STAGE_LABELS[liveStage?.name ?? ""] ?? "Generating locally"}</small>}{liveStage?.model && <small>{liveStage.model}</small>}{liveStage?.tool && <small>{liveStage.tool}</small>}</div></div>}
       </div>
-      <form className="composer" onSubmit={submit}><label htmlFor="assistant-input">Message</label><textarea id="assistant-input" rows={3} value={input} maxLength={8_000} onChange={(event) => setInput(event.target.value)} placeholder="Ask for a forecast, supported departments, historical backtest, radiology result or service status…" /><div className="composer-foot"><span>{input.length}/8000</span><button disabled={busy || !input.trim()}>Send request</button></div></form>
+      <form className="composer" onSubmit={submit}><label htmlFor="assistant-input">Message</label><textarea id="assistant-input" rows={3} value={input} maxLength={8_000} onChange={(event) => setInput(event.target.value)} placeholder="Ask naturally about the prototype, or request a forecast, radiology result, translation capability or service status…" /><div className="composer-foot"><span>{input.length}/8000</span><button disabled={busy || !input.trim()}>Send request</button></div></form>
     </section>
   )
 }
