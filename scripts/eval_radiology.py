@@ -79,7 +79,7 @@ def prediction_score(result, label):
 def disease_scores(result):
     values = []
     for item in result.get("predictions") or []:
-        if item.get("stage") == "disease":
+        if item.get("stage") in {"disease", "disease_subtype"}:
             values.append((str(item.get("label", "")), float(item.get("score", 0))))
     return sorted(values, key=lambda item: item[1], reverse=True)
 
@@ -125,6 +125,50 @@ def build_threshold_sweep(samples, configured_threshold):
     return rows, best
 
 
+def roc_auc(samples):
+    positives = [score for expected, score in samples if expected == "unhealthy"]
+    negatives = [score for expected, score in samples if expected == "healthy"]
+    if not positives or not negatives:
+        return None
+    wins = 0.0
+    for positive in positives:
+        for negative in negatives:
+            if positive > negative:
+                wins += 1.0
+            elif positive == negative:
+                wins += 0.5
+    return wins / (len(positives) * len(negatives))
+
+
+def exhaustive_threshold_search(samples):
+    if not samples:
+        return None
+    scores = sorted({float(score) for _, score in samples})
+    candidates = {0.0, 1.0}
+    for left, right in zip(scores, scores[1:]):
+        candidates.add((left + right) / 2.0)
+    candidates.update(scores)
+    rows = [threshold_metrics(samples, threshold) for threshold in sorted(candidates)]
+    eligible = [row for row in rows if row["balanced_accuracy"] is not None]
+    return max(eligible, key=lambda row: (row["balanced_accuracy"], row["accuracy"], row["abnormal_sensitivity"], row["normal_specificity"])) if eligible else None
+
+
+def score_separation(samples):
+    abnormal = [score for expected, score in samples if expected == "unhealthy"]
+    normal = [score for expected, score in samples if expected == "healthy"]
+    if not abnormal or not normal:
+        return None
+    minimum_abnormal = min(abnormal)
+    maximum_normal = max(normal)
+    separated = minimum_abnormal > maximum_normal
+    return {
+        "minimum_abnormal_score": minimum_abnormal,
+        "maximum_normal_score": maximum_normal,
+        "perfectly_separated": separated,
+        "separating_threshold_midpoint": (minimum_abnormal + maximum_normal) / 2.0 if separated else None,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:8080")
@@ -166,6 +210,7 @@ def main():
     subtype_correct = 0
     subtype_count = 0
     subtype_not_triggered = 0
+    subtype_contract_failures = 0
     failures = 0
     prompt_variant_failures = 0
     prompt_drift = 0.0
@@ -224,10 +269,13 @@ def main():
         expected_subtype = case.get("expected_subtype")
         predicted_subtype = subtype[0][0] if subtype else None
         if expected_subtype:
-            if subtype:
-                subtype_count += 1
-                if predicted_subtype.lower() == expected_subtype.lower():
-                    subtype_correct += 1
+            if unhealthy >= threshold:
+                if subtype:
+                    subtype_count += 1
+                    if predicted_subtype.lower() == expected_subtype.lower():
+                        subtype_correct += 1
+                else:
+                    subtype_contract_failures += 1
             else:
                 subtype_not_triggered += 1
 
@@ -261,8 +309,14 @@ def main():
 
     threshold_sweep = []
     exploratory_best = None
+    exhaustive_best = None
+    discrimination_auc = None
+    separation = None
     if configured_threshold is not None and threshold_samples:
         threshold_sweep, exploratory_best = build_threshold_sweep(threshold_samples, configured_threshold)
+        exhaustive_best = exhaustive_threshold_search(threshold_samples)
+        discrimination_auc = roc_auc(threshold_samples)
+        separation = score_separation(threshold_samples)
 
     summary = {
         "cases": len(manifest.get("cases", [])),
@@ -272,14 +326,18 @@ def main():
         "screening_accuracy": screening_correct / screening_count if screening_count else None,
         "abnormal_sensitivity": abnormal_correct / abnormal_count if abnormal_count else None,
         "normal_specificity": normal_correct / normal_count if normal_count else None,
+        "screening_roc_auc": discrimination_auc,
+        "screening_score_separation": separation,
         "subtype_accuracy_when_triggered": subtype_correct / subtype_count if subtype_count else None,
         "subtype_cases_triggered": subtype_count,
         "subtype_cases_not_triggered": subtype_not_triggered,
+        "subtype_contract_failures": subtype_contract_failures,
         "median_model_latency_ms": statistics.median(latencies) if latencies else None,
         "p95_model_latency_ms": percentile(latencies, 0.95),
         "configured_screening_threshold": configured_threshold,
         "threshold_sweep": threshold_sweep,
         "exploratory_best_balanced_threshold": exploratory_best,
+        "exploratory_best_observed_split": exhaustive_best,
         "threshold_sweep_scope": "descriptive smoke-evaluation only; do not tune the production threshold from this small potentially overlapping sample",
         "prompt_invariance_max_unhealthy_score_delta": prompt_drift if args.prompt_all else None,
         "prompt_invariance_complete_cases": prompt_invariance_complete_cases if args.prompt_all else None,
