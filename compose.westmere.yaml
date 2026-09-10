@@ -23,7 +23,7 @@ services:
       - --alias
       - ${AGENT_MODEL_NAME:-ndhis-agent-westmere}
       - --ctx-size
-      - ${AGENT_MAX_MODEL_LEN:-4096}
+      - ${AGENT_MAX_MODEL_LEN:-2048}
       - --parallel
       - ${WESTMERE_AGENT_PARALLEL:-1}
       - --threads
@@ -36,8 +36,19 @@ services:
       - ${WESTMERE_AGENT_UBATCH_SIZE:-512}
       - --numa
       - ${WESTMERE_AGENT_NUMA:-distribute}
+      - --load-mode
+      - ${WESTMERE_AGENT_LOAD_MODE:-mmap}
+      - --cache-reuse
+      - ${WESTMERE_AGENT_CACHE_REUSE:-0}
+      - --prio
+      - ${WESTMERE_AGENT_PRIO:-0}
+      - --poll
+      - ${WESTMERE_AGENT_POLL:-50}
+      - --sleep-idle-seconds
+      - "${WESTMERE_AGENT_SLEEP_IDLE_SECONDS:--1}"
       - --spec-type
       - ${WESTMERE_AGENT_SPEC_TYPE:-none}
+      - --warmup
       - --cache-prompt
       - --cache-ram
       - "0"
@@ -109,6 +120,8 @@ services:
       AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-128}
       AGENT_ROUTER_MAX_TOKENS: ${AGENT_ROUTER_MAX_TOKENS:-40}
       AGENT_ASSISTANT_MAX_TOKENS: ${AGENT_ASSISTANT_MAX_TOKENS:-96}
+      AGENT_STARTUP_WARMUP: ${AGENT_STARTUP_WARMUP:-1}
+      AGENT_STARTUP_WARMUP_TIMEOUT_SECONDS: ${AGENT_STARTUP_WARMUP_TIMEOUT_SECONDS:-60}
       ASR_MODEL_NAME: ${ASR_MODEL_NAME:-faster-whisper-base}
       TRANSLATION_MODEL_NAME: ${TRANSLATION_MODEL_NAME:-translatepsy-euronano-tiny}
       FORECAST_MODEL_NAME: ${FORECAST_MODEL_NAME:-autoregressive-ridge}

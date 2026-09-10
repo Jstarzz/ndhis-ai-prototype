@@ -152,7 +152,7 @@ func main() {
 		rates:     map[string]rateState{},
 		semaphore: make(chan struct{}, cfg.MaxConcurrent),
 	}
-	go s.warmAgentV2()
+	s.warmAgentStartupV3()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/system", s.guard(s.systemInfo))
