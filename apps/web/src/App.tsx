@@ -9,12 +9,12 @@ import { Translation } from "./components/Translation"
 import type { ServiceState, Tab } from "./types"
 
 const navItems: Array<{ id: Tab; label: string; detail: string }> = [
-  { id: "overview", label: "Overview", detail: "Readiness and demo paths" },
-  { id: "assistant", label: "Assistant", detail: "Grounded tool routing" },
-  { id: "translation", label: "Translation", detail: "Live local speech" },
-  { id: "forecasting", label: "Forecasting", detail: "Synthetic JNF demand" },
-  { id: "radiology", label: "Radiology", detail: "Human-review support" },
-  { id: "system", label: "System", detail: "Models, limits and audit" },
+  { id: "overview", label: "Overview", detail: "Site status and activity" },
+  { id: "assistant", label: "Operations", detail: "Queries and tool workflows" },
+  { id: "translation", label: "Interpreter", detail: "Live speech translation" },
+  { id: "forecasting", label: "Forecasts", detail: "Demand and capacity" },
+  { id: "radiology", label: "Imaging", detail: "Chest X-ray screening" },
+  { id: "system", label: "System", detail: "Runtime and audit" },
 ]
 
 function App() {
@@ -43,21 +43,21 @@ function App() {
   return (
     <div className="app-frame">
       <aside className="sidebar">
-        <div className="brand-block"><div className="brand-mark" aria-hidden="true">N</div><div><strong>NDHIS AI</strong><span>Clinical prototype</span></div></div>
-        <div className="facility-block"><span>Demo facility</span><strong>JNF General Hospital</strong><small>Local infrastructure · synthetic data</small></div>
-        <nav className="side-nav" aria-label="Prototype sections">
+        <div className="brand-block"><div className="brand-mark" aria-hidden="true">N</div><div><strong>NDHIS</strong><span>Clinical workstation</span></div></div>
+        <div className="facility-block"><span>Facility</span><strong>JNF General Hospital</strong><small>Prototype · local processing</small></div>
+        <nav className="side-nav" aria-label="Workstation modules">
           {navItems.map((item) => (
             <button type="button" key={item.id} className={tab === item.id ? "nav-item active" : "nav-item"} onClick={() => setTab(item.id)}>
               <span>{item.label}</span><small>{item.detail}</small>
             </button>
           ))}
         </nav>
-        <div className="sidebar-foot"><div className="runtime-line"><span className="status-dot ready-dot" /> Local inference</div><span>{readyCount}/4 services ready</span></div>
+        <div className="sidebar-foot"><div className="runtime-line"><span className="status-dot ready-dot" /> Local services</div><span>{readyCount === 4 ? "All services ready" : `${readyCount}/4 services ready`}</span></div>
       </aside>
 
       <main className="content-shell">
-        <header className="page-header"><div><p className="kicker">NDHIS local clinical AI</p><h1>{current.label}</h1></div><div className="header-meta"><span>Doctor demo session</span><strong>De-identified only</strong></div></header>
-        <div className="scope-notice" role="note">Prototype environment. No autonomous diagnosis, treatment decision, or production patient-data integration.</div>
+        <header className="page-header"><div><p className="kicker">Clinical decision-support workstation</p><h1>{current.label}</h1><p className="page-subtitle">{current.detail}</p></div><div className="header-meta"><span>JNF General Hospital</span><strong>Doctor · Prototype session</strong></div></header>
+        <div className="scope-notice" role="note"><strong>Prototype</strong><span>Synthetic or de-identified data only</span><span>Clinical review required</span></div>
         {tab === "overview" && <Overview health={health} onNavigate={setTab} />}
         {tab === "assistant" && <Assistant />}
         {tab === "translation" && <Translation />}
