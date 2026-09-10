@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "cases": [
     {
       "id": "service_status",
@@ -38,6 +38,13 @@
     {
       "id": "general_local_inference",
       "messages": [{"role": "user", "content": "Why can local inference be useful in a hospital deployment?"}],
+      "message_variants": [
+        [{"role": "user", "content": "What are the practical advantages of running AI models locally in a hospital?"}],
+        [{"role": "user", "content": "Why might JNF prefer on-premises model inference instead of sending requests to a cloud AI service?"}],
+        [{"role": "user", "content": "Explain the value of local model execution for this clinical workstation."}],
+        [{"role": "user", "content": "How does keeping inference on the hospital network help this prototype?"}],
+        [{"role": "user", "content": "What does a local inference architecture give a hospital that a cloud-only design does not?"}]
+      ],
       "expected": {"routing": "assistant", "llm_calls": 1, "stream_delta": true}
     },
     {
