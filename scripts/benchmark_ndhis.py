@@ -63,13 +63,18 @@ def stream_request(base, key, messages, timeout):
 def summarize(samples):
     walls = [sample["wall_ms"] for sample in samples]
     server = [float(sample["server_latency_ms"]) for sample in samples if sample.get("server_latency_ms") is not None]
+    stages = [sample["first_stage_ms"] for sample in samples if sample.get("first_stage_ms") is not None]
     deltas = [sample["first_delta_ms"] for sample in samples if sample.get("first_delta_ms") is not None]
     return {
         "runs": len(samples),
         "median_wall_ms": statistics.median(walls),
         "p95_wall_ms": percentile(walls, 0.95),
         "median_server_ms": statistics.median(server) if server else None,
+        "p95_server_ms": percentile(server, 0.95) if server else None,
+        "median_first_stage_ms": statistics.median(stages) if stages else None,
+        "p95_first_stage_ms": percentile(stages, 0.95) if stages else None,
         "median_first_delta_ms": statistics.median(deltas) if deltas else None,
+        "p95_first_delta_ms": percentile(deltas, 0.95) if deltas else None,
         "routing": samples[-1].get("routing"),
         "llm_calls": samples[-1].get("llm_calls"),
         "tool": samples[-1].get("tool"),
@@ -106,7 +111,9 @@ def main():
 
     output = {"base": args.base, "runs": args.runs, "results": results}
     if args.output:
-        Path(args.output).write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -1,35 +1,64 @@
 # Westmere inference performance
 
-The dual-X5650 deployment is constrained by CPU ISA and memory topology, not RAM capacity. The X5650 exposes SSE4.x but not AVX/AVX2/F16C, so modern transformer inference remains expensive even when a quantized model fits comfortably in memory.
+The dual-X5650 deployment is constrained by CPU ISA, memory bandwidth and NUMA topology rather than RAM capacity. The X5650 exposes SSE4.x but not AVX/AVX2/F16C, so modern transformer decode remains expensive even when a quantized model fits comfortably in memory.
 
-## Measured baseline
+## Measured evolution
 
-The initial 8B-class benchmark on this host produced roughly:
+The original 8B-class agent produced about 1.7-1.9 decode tok/s and multi-minute tool-backed chat. After moving to the smaller Gemma E2B-class runtime, disabling thinking, removing duplicate model passes, adding deterministic specialist routing and rebuilding llama.cpp with OpenBLAS, the target now measures roughly:
 
-| Output | Prompt/TTFT | Decode | Total |
-| --- | ---: | ---: | ---: |
-| 64 tokens | 8.1 s on a tiny prompt | 1.92 tok/s | 41 s |
-| 256 tokens | 8.0 s on a tiny prompt | 1.84 tok/s | 146 s |
-| 700 tokens | 6.9 s on a tiny prompt | 1.66 tok/s | 428 s |
+| Path | Current target-host result |
+| --- | ---: |
+| raw warm model TTFT | about 0.3-0.6 s |
+| streamed application TTFT | about 0.63 s median in the latest 3-run assistant benchmark |
+| general assistant completion | about 28 s median, 53.3 s p95 |
+| constrained operational router | about 9 s median, 22.2 s p95 |
+| deterministic forecasts | about 230-241 ms |
+| deterministic language routing | tens of microseconds before specialist execution |
 
-Prompt ingestion was about 2.7 tok/s. A large system/tool prompt therefore dominates latency before decoding even starts.
+The application TTFT is already close to the raw model TTFT. PR #8 therefore targets consistency, startup cold behavior and tail latency rather than claiming a large reduction below the model's own first-token floor.
 
-## What the gateway now does
+## Serving architecture
 
-`POST /api/chat` avoids model work whenever the request is safely recognizable:
+Supported specialist operations avoid model work whenever they can be resolved safely:
 
-- service-status questions -> deterministic Go router -> tool -> deterministic formatter
-- common JNF patient-volume, bed-occupancy, and supported disease-incidence forecasts -> deterministic Go router -> tool -> deterministic formatter
-- ambiguous/general requests -> one compact LLM routing/answer call
-- tool results are formatted by the gateway; there is no second LLM "finalize" call
+```text
+obvious operation -> deterministic Go -> specialist
+ambiguous operation -> constrained Gemma router -> specialist
+general conversation -> streamed Gemma assistant
+```
 
-The chat response reports `routing` (`deterministic` or `agent`) and `llm_calls` so demo latency can be audited directly.
+Tool output is formatted by the gateway. There is no second LLM finalization pass.
 
-## llama.cpp defaults in this profile
+## Coordinated startup warm state
 
-The Westmere image is built with `GGML_NATIVE=ON` and OpenBLAS. llama.cpp documents BLAS as potentially improving prompt processing for batches above 32; it does not improve token generation.
+The earlier gateway started listening immediately and warmed the model in a background goroutine. Because the Westmere agent runs with `--parallel 1`, a real user request could race that warm-up and wait behind it.
 
-The starting profile intentionally separates decode and prefill thread counts:
+The gateway now waits for the llama.cpp `/v1/models` endpoint, performs one bounded assistant-prefix inference, and only then starts accepting HTTP traffic. This deliberately moves cold model-page, allocator and prefix initialization into service readiness instead of the first doctor interaction.
+
+The startup warm-up is bounded by `AGENT_STARTUP_WARMUP_TIMEOUT_SECONDS`. If the model never becomes ready, the gateway eventually starts rather than hanging indefinitely; later requests still receive the normal upstream failure behavior.
+
+The warm request uses the exact general-assistant system prefix, `cache_prompt: true`, thinking disabled and only two output tokens. With a single llama.cpp slot this is preferable to warming two long prefixes sequentially, because the second warm would replace most of the first slot's cached prefix anyway.
+
+## Model residency and idle cold behavior
+
+Two different cold conditions should be measured separately:
+
+- process cold: the llama.cpp process/container was restarted;
+- idle cold: the process stayed alive but mmap-backed model pages were reclaimed under host memory pressure.
+
+The default remains `WESTMERE_AGENT_LOAD_MODE=mmap`. The pinned llama.cpp build also supports `mmap+mlock`, which is worth benchmarking if the LXC/Docker memlock policy permits it. Locking pages can reduce page-reclamation surprises, but it reserves resident memory and may require container/host limits to change. Do not enable it globally without measuring startup time, RSS, TTFT and impact on the other local services.
+
+`WESTMERE_AGENT_SLEEP_IDLE_SECONDS=-1` is explicit so the model server never intentionally unloads its model during demo idle time.
+
+## Context and KV-cache pressure
+
+The Westmere default context is now 2048 instead of 4096. NDHIS sends a short system prefix plus at most four bounded conversational turns, while operational routing uses compact structured state. The smaller context reduces KV allocation and cache pressure without affecting the current prompt contracts.
+
+Keep 4096 as a comparison point. If future workflows require materially longer clinical context, restore capacity based on actual token accounting instead of silently truncating useful input.
+
+## llama.cpp tuning surface
+
+The current starting profile is:
 
 ```text
 WESTMERE_AGENT_THREADS=6
@@ -37,28 +66,49 @@ WESTMERE_AGENT_BATCH_THREADS=12
 WESTMERE_AGENT_BATCH_SIZE=2048
 WESTMERE_AGENT_UBATCH_SIZE=512
 WESTMERE_AGENT_PARALLEL=1
+WESTMERE_AGENT_NUMA=distribute
+WESTMERE_AGENT_LOAD_MODE=mmap
+WESTMERE_AGENT_CACHE_REUSE=0
+WESTMERE_AGENT_PRIO=0
+WESTMERE_AGENT_POLL=50
+WESTMERE_AGENT_SLEEP_IDLE_SECONDS=-1
+WESTMERE_AGENT_SPEC_TYPE=none
 ```
 
-Do not treat those numbers as universal winners. Benchmark them on the actual host.
+OpenBLAS improves prompt/prefill matrix work but does not materially improve sequential token generation. That matches the measured change: TTFT/prefill improved substantially while decode remained around the same range.
 
-## Prompt caching safety
+`--cache-prompt` stays enabled. Shared RAM/idle-slot cache remains disabled with `--cache-ram 0 --no-cache-idle-slots` because cross-session cache isolation matters more than speculative latency savings in this healthcare-oriented prototype.
 
-The gateway sends `cache_prompt: true` and keeps the router system prefix byte-stable. The server keeps prompt caching enabled.
+`WESTMERE_AGENT_CACHE_REUSE` is exposed but defaults to zero. Benchmark small values such as 32, 64 and 128 only with repeated prompt shapes and verify output correctness. It is not a substitute for the existing stable-prefix prompt cache.
 
-The profile explicitly disables llama.cpp's shared RAM/idle-slot cache (`--cache-ram 0 --no-cache-idle-slots`). In August 2026 a llama.cpp issue reported cross-slot restoration of unrelated conversation state from that cache. For a healthcare prototype, avoiding cross-user cache contamination is more important than squeezing out an unsafe cache hit. With `--parallel 1`, the shared cross-slot cache is not useful anyway.
+Priority and polling are also exposed. Higher polling can reduce scheduler wake latency at the cost of burning more CPU while waiting; on a shared old host that tradeoff can make other services worse. Keep priority 0 / poll 50 as the baseline and measure changes under mixed load.
 
-## Benchmark matrix
+## Target-host benchmark order
 
-Run each configuration with the same model, quant, prompt, and output cap. Record prompt tok/s, TTFT, decode tok/s, total latency, RSS and CPU utilization.
+Change one variable at a time and run both `scripts/benchmark_ndhis.py` and `scripts/benchmark_westmere_startup.py`.
 
-1. Decode threads: `6`, `12`
-2. Batch threads: `6`, `12`
-3. Batch size: `256`, `512`, `1024`, `2048`
-4. Microbatch: `64`, `128`, `256`, `512`
-5. NUMA: one-socket CPU+memory binding versus `--numa distribute`
+1. Baseline: current defaults.
+2. Context: 2048 vs 4096.
+3. Load mode: `mmap` vs `mmap+mlock` if memlock is supported.
+4. Cache reuse: 0, 32, 64, 128.
+5. Decode threads: 6 vs 12.
+6. Batch threads: 6 vs 12.
+7. NUMA: distribute vs one-socket CPU+memory binding.
+8. Speculative mode: none, ngram-simple, ngram-cache.
+9. Priority/poll only after the above are stable.
+10. Quant variants on the exact Gemma artifact if compatible builds are available.
 
-For one-socket tests, bind both CPU and memory to the same NUMA node. Do not assume Linux CPU numbering maps cleanly to socket numbers; inspect `lscpu -e=CPU,SOCKET,NODE,CORE` first.
+For one-socket tests, bind CPU and memory to the same NUMA node. Inspect `lscpu -e=CPU,SOCKET,NODE,CORE` first; do not assume logical CPU numbering.
 
-## Practical target
+A future two-slot experiment can test whether keeping separate router and assistant prefixes resident is worth the extra KV/cache and concurrent bandwidth pressure. Do not enable `parallel=2` by default merely to preserve two prefixes; dual Westmere memory bandwidth can make concurrent decode slower than a single well-tuned slot.
 
-The prototype should be architected so specialist features do not wait on the LLM. Forecasting, radiology, translation and service status have direct paths. The conversational model is an enhancement and should not be a synchronous dependency for every operation.
+## Measurement rules
+
+- Report process-cold readiness separately from first post-ready TTFT.
+- Report median and p95 TTFT, not only median.
+- Record total completion separately from TTFT because decode dominates long responses.
+- Do not interpret prompt-cache hits as raw uncached prompt-eval throughput.
+- Do not drop the host filesystem page cache as part of an automated benchmark.
+- Keep deterministic tool latency separate from model-routing latency.
+- Benchmark mixed workload impact before raising process priority or polling aggressively.
+- Keep output correctness fixed while comparing performance settings.

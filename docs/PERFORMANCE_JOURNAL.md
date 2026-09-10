@@ -4,119 +4,103 @@ This document separates measured results from architectural changes and unverifi
 
 ## Hardware constraint
 
-The Westmere target is dual Xeon X5650: 12 physical cores total, 24 logical threads with Hyper-Threading, SSE4.2, no AVX/AVX2/F16C. The machine has enough RAM for the current prototype; instruction set, memory bandwidth, NUMA behavior and autoregressive token generation are the important constraints.
+The Westmere target is dual Xeon X5650: 12 physical cores total, 24 logical threads with Hyper-Threading, SSE4.2, no AVX/AVX2/F16C. RAM capacity is adequate; instruction set, memory bandwidth, NUMA behavior and autoregressive token generation are the important constraints.
 
 ## Optimization timeline
 
 | Stage | Change | Measured result | Why it mattered |
 | --- | --- | --- | --- |
 | Baseline | Qwen3-8B-class local agent | about 1.7 decode tok/s; full gateway chat about 5-8 min | Two large LLM passes plus slow Westmere decoding made interactive use impractical. |
-| Model reduction | Gemma 4 E2B | about 3.7 tok/s with thinking enabled | Smaller effective compute improved raw decode but hidden reasoning still made requests take minutes. |
-| Reasoning removal | Gemma 4 E2B with thinking disabled | full gateway chat fell to about 30 s in the first measured configuration | Removing hidden reasoning cut generated-token work dramatically. |
-| Architecture | deterministic Go fast path and one-call ceiling | service status about 5-10 ms; common forecasts became sub-second; zero LLM calls for obvious operations | The fastest token is the token not generated. |
-| Tool finalization | removed second LLM formatter pass | supported tool routes use at most one model call and deterministic Go formatting | Avoided paying autoregressive decode twice. |
-| Prompt reduction | bounded history and compact router prompt | prompt cost fell enough that model generation became the dominant remaining latency | Westmere prompt ingestion was previously a major bottleneck. |
-| OpenBLAS | llama.cpp OpenBLAS build with split prefill/decode threads | TTFT roughly 1.7 s to 0.3-0.6 s; large-prompt prefill roughly 15 to 19 tok/s; decode remained about 3.7-4.3 tok/s | BLAS improved prompt processing as expected without changing autoregressive token generation. |
-| Multiscale forecasting | 2020-2026 hourly synthetic history, about 306k rows | forecast tools moved from about 10 ms to roughly 270-335 ms | More realistic history costs more CPU but remains comfortably sub-second. |
-| Radiology | three-stage local OpenCV ONNX pipeline | roughly 820-870 ms end-to-end on the target | Replaced a broken placeholder with a usable local screening runtime without PyTorch overhead. |
+| Model reduction | Gemma 4 E2B-class runtime | materially higher decode throughput | Smaller effective compute fit the hardware better. |
+| Reasoning removal | thinking disabled | full gateway chat fell to roughly 30 s in the first measured configuration | Hidden reasoning was expensive autoregressive work. |
+| Architecture | deterministic Go fast path and one-call ceiling | status/forecast operations became milliseconds to sub-second with zero LLM calls | The fastest token is the token not generated. |
+| Tool finalization | removed second LLM formatter pass | supported tool routes use at most one model call | Avoided paying decode twice. |
+| Prompt reduction | bounded history and compact router state | generation became the dominant remaining model latency | Reduced prompt ingestion and distraction. |
+| OpenBLAS | OpenBLAS llama.cpp build with split prefill/decode threads | TTFT roughly 1.7 s to 0.3-0.6 s; large-prompt prefill roughly 15 to 19 tok/s; decode roughly unchanged | BLAS accelerated matrix-heavy prefill as expected. |
+| Multiscale forecasting | 2020-2026 hourly synthetic history | forecasts roughly 230-335 ms in recent target runs | More realistic history remains comfortably sub-second. |
+| Radiology | three-stage local OpenCV ONNX pipeline | roughly 0.85-0.9 s median in recent smoke runs | Replaced the broken placeholder without PyTorch runtime overhead. |
+| Real streaming | actual Gemma token deltas through gateway/UI | latest assistant benchmark about 634 ms first text vs about 28 s median completion | Perceived latency follows TTFT rather than full decode time. |
+| Conversational routing | deterministic normalization + constrained router | colloquial deterministic route about 76 microseconds before specialist; ambiguous router about 9 s median | Preserved natural language without sending obvious operations through the LLM. |
 
-## Post-merge target-host verification
+## Latest target-host baseline before PR #8
 
-After the assistant-streaming/evaluation work was merged and deployed to the dual-X5650 target, the deterministic Go suite passed all 33 tests. Go microbenchmarks measured spoken-duration normalization at roughly 40 microseconds per operation and the complete deterministic colloquial forecast route at roughly 82 microseconds per operation.
+The latest three-run assistant benchmark recorded deterministic status/capability requests below roughly 15 ms, deterministic forecasts around 230-241 ms, a streamed general assistant median completion around 28.0 s with p95 around 53.3 s, and first visible assistant text around 634 ms. The constrained operational router measured about 9.0 s median and 22.2 s p95.
 
-The end-to-end assistant benchmark confirmed that deterministic forecast/status/capability cases remained on the zero-LLM path. The streamed general assistant path produced first visible text at roughly 0.6 seconds while the complete response took roughly 28 seconds in a cold-ish post-restart run. This confirms that streaming moves perceived latency close to TTFT even though autoregressive decode remains the dominant total-time cost.
+Those results show that warm TTFT is already close to the raw model's measured 0.3-0.6 s range. The largest remaining conversational cost after first text is autoregressive decode. PR #8 therefore focuses on startup cold state, TTFT consistency and tail behavior rather than claiming a large reduction below the model's own first-token floor.
 
-The 20-image radiology smoke evaluation reported 0.80 screening accuracy, 1.00 normal specificity, 0.73 abnormal sensitivity at the configured 0.91 unhealthy threshold, zero primary-run failures and about 884 ms median model latency. These are research smoke-test results only. The sample is small and potential training-data overlap has not been ruled out.
+The latest radiology smoke evaluation completed 20/20 cases with about 850 ms median inference, 1.00 screening ROC AUC on the tiny sample and 11/11 subtype accuracy when the configured screening gate triggered. Prompt-invariance repeated all requested variants with zero score drift. These remain research smoke metrics, not clinical validation.
 
-The initial prompt-invariance run showed zero unhealthy-score drift on successful repeated cases, but most repeated requests encountered gateway HTTP 429 responses because the evaluator generated traffic faster than the normal per-user limit. That run is not a complete invariance benchmark. The follow-up evaluator now rate-paces prompt variants and reports completeness explicitly before the drift metric should be interpreted.
+## PR #8: warm-state and TTFT engineering
 
-The first public-sample fetch also exposed a packaging assumption: the pinned dataset revision now presents the image corpus inside `covid19_radiography.zip` rather than as individually listed image objects. The follow-up fetcher supports both repository layouts and hashes extracted samples for reproducibility.
+### Coordinated startup warm-up
 
-## Conversational quality without giving back speed
+The previous warm-up ran in a goroutine after the gateway was initialized. With llama.cpp configured as `parallel=1`, a real request could arrive while warm-up inference was occupying the only model slot and wait behind it.
 
-### Natural-language normalization
+PR #8 changes startup semantics: the gateway polls the model endpoint, runs a bounded two-token assistant-prefix warm inference and only then begins listening for user traffic. Startup warm-up has a hard timeout so a failed model cannot block the gateway indefinitely.
 
-Common colloquial expressions are normalized before the deterministic router sees them. Examples include `A and E` to `A&E`, `minute and a half` to `1.5 minutes`, `half an hour` to `0.5 hours`, and spoken one-through-ten durations/resolutions.
+This converts cold-start latency from an unpredictable first-user penalty into an explicit service-readiness cost. The new startup benchmark measures both values separately.
 
-The target-host microbenchmarks show that this normalization layer is negligible compared with specialist inference or LLM generation, so natural-language convenience does not materially compromise the fast path.
+### Warm the prefix that matters
 
-### Separate router and assistant jobs
+The old warm-up sequentially exercised the operational router and then the conversational assistant. With one llama.cpp slot, the second request replaces most of the first cached prompt state. PR #8 warms the general-assistant prefix once instead. That still touches the model weights and execution path for all inference while leaving the most user-visible conversational prefix hot.
 
-The previous fallback asked one prompt to be both chatbot and tool router. The current design separates them:
+The constrained router remains compact enough that its prompt evaluation is a smaller part of its total latency than token generation.
+
+### Smaller context window
+
+The Westmere default context moves from 4096 to 2048. Current NDHIS assistant history is capped to four bounded messages and the operational router receives compact structured state. Reducing context lowers KV allocation and cache pressure without changing the current contract.
+
+This is an expected optimization until the target-host comparison is run. If 2048 changes output quality or truncates a valid workflow, 4096 remains the fallback.
+
+### Idle residency controls
+
+The agent explicitly keeps `sleep-idle-seconds=-1`, so llama.cpp will not intentionally unload the model during demo idle periods.
+
+`WESTMERE_AGENT_LOAD_MODE` defaults to `mmap`. `mmap+mlock` is exposed as an experiment for preventing model pages from being reclaimed after idle periods. It is not enabled by default because it consumes locked resident memory and may require LXC/Docker memlock policy changes.
+
+### Cache reuse, scheduler and speculative knobs
+
+PR #8 exposes cache-reuse, process-priority and polling controls without changing them aggressively by default:
 
 ```text
-obvious operation -> deterministic Go -> specialist
-ambiguous operation -> constrained Gemma router -> specialist
-real conversation -> streamed Gemma assistant
+WESTMERE_AGENT_CACHE_REUSE=0
+WESTMERE_AGENT_PRIO=0
+WESTMERE_AGENT_POLL=50
+WESTMERE_AGENT_SPEC_TYPE=none
 ```
 
-The operational router defaults to 40 generated tokens. The conversational assistant defaults to 96. `AGENT_MAX_TOKENS` remains the hard upper bound.
+Prompt caching remains enabled, while shared RAM/idle-slot cache stays disabled for cross-session isolation. Cache reuse values, higher polling, n-gram speculation and process priority are experiments only until target-host numbers show a useful end-to-end improvement.
 
-### Schema-constrained routing
+### Better tail-latency measurement
 
-The pinned llama.cpp revision supports schema-constrained JSON responses. The router schema limits tool names and domain fields, while Go still performs authoritative validation before execution.
+The main assistant harness now reports median and p95 for first execution stage, first streamed text and server/wall completion latency. A new `benchmark_westmere_startup.py` restarts only agent+gateway, waits for coordinated readiness, measures the first post-ready request and then repeated steady-state requests.
 
-This narrows the model's output space and reduces malformed or hallucinated tool arguments without trusting model output as authoritative application state.
+The script deliberately does not drop Linux filesystem caches. Its cold result means process/container cold, not physical-disk cold.
 
-### Structured state instead of replaying chat
+## Next target-host sweep
 
-The ambiguous operational router receives a bounded state summary plus the latest user request rather than four full turns. Forecast state includes only known metric, department, disease, horizon, resolution and as-of values.
+Run the baseline first, then change one variable at a time:
 
-This reduces uncached prompt suffix size, improves stable-prefix reuse and removes irrelevant prose from the tiny routing model's context.
+1. 2048 vs 4096 context.
+2. `mmap` vs `mmap+mlock` if memlock is supported.
+3. cache reuse 0, 32, 64, 128.
+4. decode threads 6 vs 12.
+5. batch threads 6 vs 12.
+6. NUMA distribute vs one-socket CPU+memory binding.
+7. spec type none, ngram-simple, ngram-cache.
+8. priority/poll only after the above are stable.
+9. compatible Gemma quant variants on the exact X5650 host.
 
-### Real token streaming
-
-General assistant responses stream actual model deltas through the gateway NDJSON stream and the React UI renders them immediately.
-
-Target-host measurement now confirms the intended effect: approximately 0.6-second first streamed text versus roughly 28 seconds for the complete cold-ish response. Streaming does not improve decode throughput, but it materially reduces perceived latency.
-
-### Background warm-up
-
-The gateway warms both the constrained router prefix and the conversational assistant prefix in the background after startup.
-
-The intent is to move cold model-page, allocator and prefix setup work away from the first real doctor request. Cold and warm measurements must still be reported separately because the first post-restart run can remain materially slower.
-
-### Direct radiology result lookup
-
-A known 16-character radiology result identifier routes directly to `get_radiology_result` instead of spending model time deciding an obvious tool call.
-
-This is another example of selective inference: deterministic identifiers stay deterministic, while the LLM is reserved for language ambiguity.
-
-## Radiology threshold analysis
-
-The configured unhealthy threshold of 0.91 produced perfect normal specificity but only about 0.73 abnormal sensitivity on the first 20-image smoke sample. That does not justify changing the deployed threshold by itself. The follow-up evaluation harness derives a fixed threshold sweep from the same recorded model scores and reports accuracy, sensitivity, specificity and balanced accuracy without issuing additional model requests.
-
-Any apparent best threshold from this sweep is exploratory. Threshold selection requires a larger independent validation set, explicit clinical operating objectives and preferably confidence intervals. The smoke sample is useful for understanding the direction of the tradeoff, not for claiming calibration or choosing a production clinical cutoff.
-
-## Next target-host performance sweep
-
-The pinned llama.cpp build exposes speculative n-gram modes. The compose profile exposes `WESTMERE_AGENT_SPEC_TYPE` but keeps `none` as the default until measurement.
-
-Benchmark this order:
-
-1. `none`
-2. `ngram-simple`
-3. `ngram-cache`
-
-For each mode record warm TTFT, decode tok/s, total time, output correctness and CPU utilization for both the general assistant and constrained router. Keep the mode only if it improves useful end-to-end latency rather than a synthetic token metric.
-
-Then sweep:
-
-- decode threads: 6 vs 12
-- prompt threads: 6 vs 12
-- context: 2048 vs 4096 after verifying conversation-state requirements
-- available Gemma quant variants on the exact X5650 host
-- one-socket NUMA placement vs distribute
-
-Do not enable a speculative mode, smaller context or different quant globally just because it is theoretically faster. This machine is old enough that cache behavior and NUMA placement can reverse expectations from modern AVX2 systems.
+A two-slot experiment may later test whether retaining separate router and assistant prefixes helps enough to justify the extra KV/cache footprint and memory-bandwidth contention. Keep `parallel=1` as the baseline until measured otherwise.
 
 ## Measurement rules
 
-- Report cold and warm model results separately.
-- Record output token count when comparing LLM completion latency.
+- Report process-cold gateway readiness separately from first post-ready TTFT.
+- Report TTFT median and p95, not only median.
+- Record full completion separately because decode dominates long answers.
 - Do not interpret prompt-cache hits as raw uncached prompt-eval throughput.
-- Keep deterministic tool latency separate from model routing latency.
-- Keep model inference latency separate from browser/network wall time.
-- Treat radiology benchmark accuracy as a research smoke test unless an independent, properly curated validation set and clinical evaluation protocol are established.
-- Do not tune the radiology screening threshold from the same 20-image smoke set used to characterize it.
-- Treat prompt-invariance results as valid only when all requested prompt variants completed without rate-limit or transport failures.
+- Keep deterministic specialist latency separate from model routing latency.
+- Do not automate host-wide filesystem cache dropping.
+- Keep output correctness fixed while comparing model-serving settings.
+- Do not re-enable shared cross-session cache for a small latency gain.
+- Treat radiology metrics as research smoke evaluation unless a larger independent validation protocol is established.
