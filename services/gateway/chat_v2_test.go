@@ -70,7 +70,7 @@ func TestV2AssistantCapabilitiesAreLocal(t *testing.T) {
 	if !ok || decision.Type != "answer" || intent != "assistant_capabilities" {
 		t.Fatalf("unexpected route: %#v %v %s", decision, ok, intent)
 	}
-	if !strings.Contains(decision.Content, "translation") || !strings.Contains(decision.Content, "radiology") {
+	if !strings.Contains(decision.Content, "translation") || !strings.Contains(decision.Content, "chest-X-ray") {
 		t.Fatalf("capability answer incomplete: %s", decision.Content)
 	}
 }
