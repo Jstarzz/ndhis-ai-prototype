@@ -82,6 +82,14 @@ def summarize(samples):
     }
 
 
+def prompt_sets(case, mode):
+    base = case["messages"]
+    variants = case.get("message_variants") or []
+    if mode == "repeat" or not variants:
+        return [base]
+    return [base, *variants]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:8080")
@@ -90,6 +98,7 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=95)
     parser.add_argument("--only", default="")
+    parser.add_argument("--prompt-mode", choices=("realistic", "repeat"), default="realistic")
     parser.add_argument("--output", default="")
     args = parser.parse_args()
     if args.runs < 1 or args.runs > 50:
@@ -102,14 +111,19 @@ def main():
     results = {}
     for case in cases:
         samples = []
-        for _ in range(args.runs):
-            samples.append(stream_request(args.base, args.key, case["messages"], args.timeout))
+        sets = prompt_sets(case, args.prompt_mode)
+        for run_index in range(args.runs):
+            messages = sets[run_index % len(sets)]
+            samples.append(stream_request(args.base, args.key, messages, args.timeout))
         summary = summarize(samples)
         summary["expected"] = case.get("expected")
+        summary["prompt_mode"] = args.prompt_mode
+        summary["distinct_prompt_sets_used"] = min(args.runs, len(sets))
+        summary["input_pattern"] = "varied" if len(sets) > 1 else "repeated"
         results[case["id"]] = summary
         print(json.dumps({case["id"]: summary}, indent=2))
 
-    output = {"base": args.base, "runs": args.runs, "results": results}
+    output = {"base": args.base, "runs": args.runs, "prompt_mode": args.prompt_mode, "results": results}
     if args.output:
         path = Path(args.output)
         path.parent.mkdir(parents=True, exist_ok=True)
