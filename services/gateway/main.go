@@ -152,12 +152,13 @@ func main() {
 		rates:     map[string]rateState{},
 		semaphore: make(chan struct{}, cfg.MaxConcurrent),
 	}
+	go s.warmAgentV2()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/system", s.guard(s.systemInfo))
 	mux.HandleFunc("GET /api/audit/recent", s.guard(s.recentAudit))
-	mux.HandleFunc("POST /api/chat", s.guard(s.chat))
-	mux.HandleFunc("POST /api/chat/stream", s.guard(s.chatStream))
+	mux.HandleFunc("POST /api/chat", s.guard(s.chatV2))
+	mux.HandleFunc("POST /api/chat/stream", s.guard(s.chatStreamV2))
 	mux.HandleFunc("POST /api/forecast", s.guard(s.forecastProxy))
 	mux.HandleFunc("GET /api/forecast/capabilities", s.guard(s.forecastCapabilitiesProxy))
 	mux.HandleFunc("POST /api/forecast/history", s.guard(s.forecastHistoryProxy))

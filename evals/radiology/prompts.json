@@ -1,0 +1,5 @@
+{
+  "screening_conservative": "Screen this chest radiograph using the local research pipeline. Report the screening scores and only report a disease subtype when the configured unhealthy threshold is crossed. Do not call a below-threshold result normal.",
+  "scores_only": "Run the local chest-X-ray screening pipeline and return model scores with the configured threshold. Do not make a diagnosis or treatment recommendation.",
+  "uncertainty_stress": "Analyze this public or de-identified chest radiograph with the local research screening model. Preserve uncertainty, show the screening result, and require clinician review."
+}

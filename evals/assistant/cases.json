@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "service_status",
+      "messages": [{"role": "user", "content": "What AI services are currently available?"}],
+      "expected": {"routing": "deterministic", "tool": "get_service_status", "llm_calls": 0}
+    },
+    {
+      "id": "canonical_patient_forecast",
+      "messages": [{"role": "user", "content": "Forecast A&E patient arrivals for the next 30 days."}],
+      "expected": {"routing": "deterministic", "tool": "forecast_patient_volume", "llm_calls": 0}
+    },
+    {
+      "id": "multiscale_forecast",
+      "messages": [{"role": "user", "content": "Forecast A&E patient arrivals for the next 3 days hourly."}],
+      "expected": {"routing": "deterministic", "tool": "forecast_patient_volume", "llm_calls": 0}
+    },
+    {
+      "id": "colloquial_minute_and_half",
+      "messages": [{"role": "user", "content": "Gimme forecasts for A and E patients for the next minute and a half"}],
+      "expected": {"routing": "deterministic", "tool": "forecast_patient_volume", "llm_calls": 0}
+    },
+    {
+      "id": "colloquial_slot_fill",
+      "messages": [
+        {"role": "user", "content": "Forecast A and E patients"},
+        {"role": "assistant", "content": "What forecast horizon do you want?"},
+        {"role": "user", "content": "minute and a half"}
+      ],
+      "expected": {"routing": "deterministic", "tool": "forecast_patient_volume", "llm_calls": 0}
+    },
+    {
+      "id": "assistant_capabilities",
+      "messages": [{"role": "user", "content": "What does this do?"}],
+      "expected": {"routing": "deterministic", "llm_calls": 0}
+    },
+    {
+      "id": "general_local_inference",
+      "messages": [{"role": "user", "content": "Why can local inference be useful in a hospital deployment?"}],
+      "expected": {"routing": "assistant", "llm_calls": 1, "stream_delta": true}
+    },
+    {
+      "id": "nuanced_emergency_forecast",
+      "messages": [{"role": "user", "content": "Emergency seems unusually busy right now. What do the next three hours look like?"}],
+      "expected": {"routing": "agent-router", "llm_calls": 1}
+    }
+  ]
+}
