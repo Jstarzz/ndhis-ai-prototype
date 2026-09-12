@@ -38,19 +38,43 @@ python scripts/benchmark_ndhis.py \
   --output data/benchmarks/assistant.json
 ```
 
-For each case the harness records wall latency, gateway-reported latency, routing mode, LLM call count, tool selection, first execution-stage latency and first streamed assistant delta. It reports median and p95 values for both execution start and first text so TTFT variance is visible instead of only the median.
+The default `--prompt-mode realistic` uses semantically equivalent prompt variants when a case provides them. This matters for TTFT: repeating the exact same user message allows llama.cpp to reuse the user-message KV state and can make first-token latency look much better than a real doctor asking a new question.
+
+The `general_local_inference` case includes multiple equivalent user prompts specifically so its TTFT represents fresh-turn prefill rather than a repeated-prompt cache hit. The report records `prompt_mode`, `input_pattern` and `distinct_prompt_sets_used` for each case.
+
+Use `--prompt-mode repeat` only when you intentionally want the optimistic repeated-identical-prompt cache-hit measurement:
+
+```bash
+python scripts/benchmark_ndhis.py \
+  --only general_local_inference \
+  --runs 10 \
+  --prompt-mode repeat
+```
+
+For each case the harness records wall latency, gateway-reported latency, routing mode, LLM call count, tool selection, first execution-stage latency and first streamed assistant delta. It reports median and p95 values for execution start, first text and completion.
+
+The completed CT 110 tuning campaign measured roughly:
+
+- varied real-world assistant TTFT: 1.60 s median / 1.75 s p95;
+- repeated-identical-prompt TTFT: about 0.58-0.60 s;
+- general assistant completion: about 24.4 s median / 25.3 s p95;
+- prompt throughput: about 12.5 tok/s;
+- decode throughput: about 3.95 tok/s.
+
+Do not compare a repeated-prompt run to a varied-prompt run as though they measure the same thing.
 
 Useful focused runs:
 
 ```bash
 python scripts/benchmark_ndhis.py --only general_local_inference --runs 10
+python scripts/benchmark_ndhis.py --only general_local_inference --runs 10 --prompt-mode repeat
 python scripts/benchmark_ndhis.py --only nuanced_emergency_forecast --runs 10
 python scripts/benchmark_ndhis.py --only colloquial_minute_and_half --runs 20
 ```
 
 ## 3. Process-cold and warm-state benchmark
 
-The Westmere gateway now completes its model warm-up before it begins accepting traffic. Measure startup readiness separately from the first user request:
+The Westmere gateway completes its model warm-up before it begins accepting traffic. Measure startup readiness separately from the first user request:
 
 ```bash
 python scripts/benchmark_westmere_startup.py \
@@ -65,11 +89,11 @@ Each run restarts only the `agent` and `gateway` containers, waits for `/api/hea
 - container restart command duration;
 - time until the gateway becomes reachable after coordinated warm-up;
 - first post-ready TTFT and completion time;
-- steady-state TTFT and completion time.
+- repeated-prompt steady-state TTFT and completion time.
+
+The startup benchmark's repeated steady-state request is intentionally a cache-hit diagnostic. The completed target-host campaign measured roughly 583 ms repeated-prompt TTFT there, while distinct real user questions remained roughly 1.5-1.8 s. Use the main assistant benchmark's realistic prompt mode for the user-facing TTFT number.
 
 This is a process-cold benchmark, not a physical-disk cold benchmark. The script intentionally does not drop the Linux filesystem page cache because doing so is host-wide, privileged and would contaminate other services.
-
-When comparing Westmere model-serving settings, change one variable at a time and rerun both the startup and steady-state benchmarks. Candidate settings live in `.env.westmere` and include context size, load mode, cache reuse, priority, polling, speculative mode, decode threads, prompt threads and NUMA placement.
 
 ## 4. Radiology runtime and labeled smoke evaluation
 
@@ -118,8 +142,8 @@ The labeled sample is a research smoke test. Training-data overlap with the curr
 | deterministic forecast | under 750 ms |
 | radiology pipeline | under 2 s |
 | deterministic colloquial route | under 750 ms including forecast service |
-| general assistant steady-state first text | median under 750 ms, p95 under 1.5 s |
-| first post-ready assistant text | under 1.5 s |
-| operational LLM router | one LLM call, no raw 502 on bad model output |
+| varied-prompt general assistant first text | median under 2 s, p95 under 2 s on the current CT 110 target |
+| first post-ready assistant text | under 2 s |
+| operational LLM router | one LLM call, valid constrained output or friendly clarification, no raw 502 |
 
-The TTFT targets are engineering goals based on the measured Gemma/OpenBLAS range, not clinical service-level guarantees. Total conversational completion remains constrained by Westmere autoregressive decode throughput.
+These are prototype engineering targets derived from the current measured hardware, not clinical service-level guarantees. Total conversational completion remains constrained by Westmere autoregressive decode throughput.
